@@ -823,28 +823,150 @@ async function getAiAdvice() {
         if (data.ok && data.data) {
             currentAdviceData = data.data;
             ui.adviceSection.classList.remove("hidden");
-            ui.adviceAnalysis.textContent = currentAdviceData.analysis || "无总体评价";
+            // 1. Score & Analysis
+            const scoreHtml = currentAdviceData.score_prediction 
+                ? `<div style="font-size: 1.2em; font-weight: bold; color: var(--primary); margin-bottom: 8px;">${currentAdviceData.score_prediction}</div>` 
+                : '';
+            ui.adviceAnalysis.innerHTML = scoreHtml + (currentAdviceData.analysis || "无总体评价");
             
+            // 2. Structure Advice (Restored)
+            const structDiv = document.createElement('div');
+            structDiv.style.margin = "16px 0";
+            structDiv.style.padding = "12px";
+            structDiv.style.background = "#f0f9ff";
+            structDiv.style.borderLeft = "4px solid #0ea5e9";
+            structDiv.innerHTML = `<h4 style="margin:0 0 8px 0;">🏗️ 写作思路与结构进阶</h4>
+                                   <div style="font-size:0.95em; white-space: pre-wrap;">${currentAdviceData.structure_advice || "暂无结构建议"}</div>`;
+            
+            // 3. Alternative Ideas
+            const ideaDiv = document.createElement('div');
+            ideaDiv.style.margin = "16px 0";
+            ideaDiv.style.padding = "12px";
+            ideaDiv.style.background = "#fff7ed"; // Light orange
+            ideaDiv.style.borderLeft = "4px solid #f97316";
+            
+            let ideaHtml = `<h4 style="margin:0 0 12px 0; color:#c2410c;">💡 多维审题与构思拓展</h4>`;
+            (currentAdviceData.alternative_ideas || []).forEach(idea => {
+                ideaHtml += `<div style="margin-bottom:8px;">
+                                <div style="font-weight:bold; color:#ea580c;">${idea.title}</div>
+                                <div style="font-size:0.95em; color:#431407;">${idea.desc}</div>
+                             </div>`;
+            });
+            if (!currentAdviceData.alternative_ideas || currentAdviceData.alternative_ideas.length === 0) {
+                ideaHtml += `<div style="font-size:0.9em; color:#777;">（暂无构思建议）</div>`;
+            }
+            ideaDiv.innerHTML = ideaHtml;
+
             ui.adviceList.innerHTML = "";
+            ui.adviceList.appendChild(structDiv);
+            ui.adviceList.appendChild(ideaDiv);
+
+            // 4. Detailed Suggestions
+            const listHeader = document.createElement('h4');
+            listHeader.textContent = "✍️ 细节润色与手法升级";
+            listHeader.style.margin = "20px 0 8px 0";
+            ui.adviceList.appendChild(listHeader);
+
             (currentAdviceData.suggestions || []).forEach((item, idx) => {
                 const div = document.createElement("div");
-                div.style.marginBottom = "12px";
-                div.style.padding = "8px";
-                div.style.borderLeft = "3px solid var(--primary)";
-                div.style.background = "rgba(0,0,0,0.03)";
+                div.style.marginBottom = "16px";
+                div.style.padding = "12px";
+                div.style.border = "1px solid var(--border)";
+                div.style.borderRadius = "6px";
+                div.style.background = "var(--bg)";
                 
-                let html = `<div><strong>建议 ${idx+1}:</strong></div>`;
+                let html = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                                <strong>建议 ${idx+1}</strong>
+                                <span style="font-size:0.85em; background:var(--bg-muted); padding:2px 6px; border-radius:4px; color:var(--primary);">${item.technique || "润色建议"}</span>
+                            </div>`;
+                
                 if (item.original) {
-                    html += `<div style="color:var(--muted); font-size:0.9em;">原文：${item.original}</div>`;
+                    html += `<div style="color:var(--muted); font-size:0.9em; margin-bottom:6px; padding-left:8px; border-left:2px solid #ccc;">
+                                原文：${item.original}
+                             </div>`;
                 }
                 
-                // Process markdown bold for highlighting
-                const highlighted = item.suggestion.replace(/\*\*(.*?)\*\*/g, '<span style="color:#d9534f; font-weight:bold;">$1</span>');
-                html += `<div style="margin:4px 0;">建议：${highlighted}</div>`;
-                html += `<div style="font-size:0.9em; color:var(--text);">理由：${item.reason}</div>`;
+                html += `<div style="margin-bottom:8px; font-size:0.95em;">
+                            <strong>分析：</strong>${item.suggestion}
+                         </div>`;
+                         
+                // Highlighted refined text
+                if (item.refined_text) {
+                    const highlighted = item.refined_text.replace(/\*\*(.*?)\*\*/g, '<span style="color:#d9534f; font-weight:bold;">$1</span>');
+                    html += `<div style="background:#fff1f0; padding:8px; border-radius:4px; border-left:3px solid #d9534f;">
+                                <strong>🚀 升格示例：</strong>${highlighted}
+                             </div>`;
+                } else if (item.suggestion && !item.refined_text) {
+                     // Fallback for old format
+                     const highlighted = item.suggestion.replace(/\*\*(.*?)\*\*/g, '<span style="color:#d9534f; font-weight:bold;">$1</span>');
+                    html += `<div>建议：${highlighted}</div>`;
+                }
                 
                 div.innerHTML = html;
                 ui.adviceList.appendChild(div);
+            });
+
+            // 5. Style Demonstrations
+            const styleHeader = document.createElement('h4');
+            styleHeader.textContent = "🎨 三种风格润色示范 (每种风格 3 例)";
+            styleHeader.style.margin = "24px 0 12px 0";
+            ui.adviceList.appendChild(styleHeader);
+
+            (currentAdviceData.style_demonstrations || []).forEach(demo => {
+                const card = document.createElement('div');
+                card.style.marginBottom = "24px";
+                card.style.padding = "16px";
+                card.style.borderRadius = "8px";
+                card.style.background = "#fff";
+                card.style.boxShadow = "0 2px 8px rgba(0,0,0,0.08)";
+                card.style.border = "1px solid #e5e7eb";
+
+                // Style Title Color
+                let titleColor = "#333";
+                let badgeColor = "#e5e7eb";
+                if (demo.style_name.includes("中考")) { titleColor = "#16a34a"; badgeColor = "#dcfce7"; } 
+                else if (demo.style_name.includes("散文")) { titleColor = "#9333ea"; badgeColor = "#f3e8ff"; }
+                else if (demo.style_name.includes("思辨")) { titleColor = "#2563eb"; badgeColor = "#dbeafe"; }
+
+                let html = `<div style="display:flex; align-items:center; margin-bottom:12px; border-bottom: 2px solid ${badgeColor}; padding-bottom: 8px;">
+                                <div style="font-weight:bold; font-size:1.2em; color:${titleColor};">${demo.style_name}</div>
+                            </div>`;
+                
+                // Iterate through examples
+                const examples = demo.examples || [];
+                if (examples.length === 0 && demo.refined_text) {
+                     // Fallback for old structure if LLM returns old format
+                     examples.push({
+                         original_snippet: demo.original_snippet,
+                         refined_text: demo.refined_text,
+                         comment: demo.comment
+                     });
+                }
+
+                examples.forEach((ex, i) => {
+                    html += `<div style="margin-bottom: 16px;">
+                                <div style="font-size:0.9em; font-weight:bold; color:#555; margin-bottom:4px;">示例 ${i+1}</div>`;
+                    
+                    if (ex.original_snippet) {
+                        html += `<div style="font-size:0.9em; color:#666; margin-bottom:6px; font-style:italic; padding-left: 8px; border-left: 2px solid #ccc;">
+                                    原文：“${ex.original_snippet}”
+                                 </div>`;
+                    }
+                    
+                    html += `<div style="font-size:1em; line-height:1.6; color:#1f2937; margin-bottom:6px; padding:10px; background:${badgeColor}; border-radius:6px;">
+                                ${ex.refined_text}
+                             </div>`;
+                    
+                    if (ex.comment) {
+                        html += `<div style="font-size:0.85em; color:#6b7280;">
+                                    <span style="font-weight:bold;">解析：</span>${ex.comment}
+                                 </div>`;
+                    }
+                    html += `</div>`;
+                });
+                
+                card.innerHTML = html;
+                ui.adviceList.appendChild(card);
             });
             
             // Scroll to advice

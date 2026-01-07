@@ -557,17 +557,75 @@ def call_llm_fix_punctuation(text, api_key):
 def call_llm_advice(text, api_key):
     dashscope.api_key = api_key
     prompt = f"""
-    你是一位资深的中学语文教师。请阅读以下作文，提供针对性的高分修改建议。
+    你是一位资深的上海中考语文阅卷组长及文学评论家。请根据【上海中考作文评分标准】，对以下学生作文进行全方位的深度辅导。
     
-    要求：
-    1. 指出文章的亮点和不足。
-    2. 提供具体的修改建议，包括词语替换、句式调整或段落重组。
-    3. 如果有精彩的润色语句，请用【高亮】（如 **加粗** 或特殊的标记）标出，以便前端展示。
-    4. 返回格式为 JSON，包含两个字段：
-       - "analysis": 整体点评（字符串）。
-       - "suggestions": 修改建议列表，每项包含 "original"（原文片段，可选）、"suggestion"（修改建议，支持 markdown 高亮）、"reason"（修改理由）。
+    【任务目标】：请提供一份包含以下五个维度的完整诊断报告，缺一不可。
     
-    作文内容：
+    1. **【评分与诊断】**：
+       - 预估得分（满分60分）。
+       - 简要点评优缺点。
+       
+    2. **【结构与进阶思路】**（保留原有功能）：
+       - 分析当前思路，并提供一个**“高分进阶思路”**（如：如何从“记事”提升到“感悟”）。
+       
+    3. **【多维审题与构思拓展】**（新需求）：
+       - 针对题目背景，按照上海中考构思逻辑（成长、思辨、自我认知），提供 2-3 个全新的**高分立意方向**。
+       
+    4. **【细节润色与手法升级】**（核心功能，请详细）：
+       - 挑选文中 **5-8** 处可提升的句子，指出其问题，并运用高级写作手法（环境烘托、心理刻画、修辞）进行升格修改。
+       
+    5. **【三种风格润色示范】**（新需求）：
+       - 请针对文中的不同片段，分别提供以下三种风格的润色示范。**每种风格至少提供 3 个不同的精彩改写示例**：
+       
+         a. **【上海中考·真情实感风】**（细腻、真实、动人）
+            - 示例1：...
+            - 示例2：...
+            - 示例3：...
+         b. **【名家·经典散文风】**（李娟/汪曾祺风格，质朴灵动）
+            - 示例1：...
+            - 示例2：...
+            - 示例3：...
+         c. **【诗意哲理·名句引用风】**（符合上海中学生认知，重点引用中国古代著名诗人、词人的经典名句，如苏轼、李白、辛弃疾等，将诗词意境与哲理融合）
+            - 示例1：...
+            - 示例2：...
+            - 示例3：...
+    
+    【返回格式】：请返回严格的 JSON 格式，包含以下字段：
+    - "score_prediction": "预估得分：xx/60"
+    - "analysis": "总体点评..."
+    - "structure_advice": "写作思路与结构进阶建议..." (字符串)
+    - "alternative_ideas": [
+        {{ "title": "构思一：xxxxx", "desc": "具体阐述..." }},
+        {{ "title": "构思二：xxxxx", "desc": "具体阐述..." }}
+      ]
+    - "suggestions": [
+        {{
+           "original": "原文片段...",
+           "technique": "运用了xx手法",
+           "suggestion": "分析与建议...",
+           "refined_text": "升格后的精彩句子..."
+        }}
+      ]
+    - "style_demonstrations": [
+        {{
+           "style_name": "【上海中考·真情实感风】",
+           "examples": [
+                {{ "original_snippet": "片段1...", "refined_text": "改写1...", "comment": "解析..." }},
+                {{ "original_snippet": "片段2...", "refined_text": "改写2...", "comment": "解析..." }},
+                {{ "original_snippet": "片段3...", "refined_text": "改写3...", "comment": "解析..." }}
+           ]
+        }},
+        {{
+           "style_name": "【名家·经典散文风】",
+           "examples": [ ... ]
+        }},
+        {{
+           "style_name": "【诗意哲理·名句引用风】",
+           "examples": [ ... ]
+        }}
+      ]
+    
+    【作文内容】：
     {text[:8000]}
     """
     try:
@@ -583,6 +641,7 @@ def call_llm_advice(text, api_key):
             try:
                 return True, json.loads(content)
             except:
+                # Try to salvage partial JSON or return raw text wrapped
                 return False, f"Invalid JSON: {content}"
         return False, resp.message
     except Exception as e:
@@ -870,23 +929,68 @@ def api_generate_advice_word():
         doc.add_paragraph(original_text)
         
         # Analysis
-        doc.add_heading('整体点评', 1)
+        doc.add_heading('整体点评与评分', 1)
+        if advice_data.get('score_prediction'):
+             doc.add_paragraph(advice_data['score_prediction']).bold = True
         doc.add_paragraph(advice_data.get('analysis', ''))
         
+        # Structure Advice
+        if advice_data.get('structure_advice'):
+            doc.add_heading('写作思路与结构进阶', 1)
+            doc.add_paragraph(advice_data['structure_advice'])
+            
+        # Alternative Ideas
+        if advice_data.get('alternative_ideas'):
+            doc.add_heading('多维审题与构思拓展', 1)
+            for idea in advice_data['alternative_ideas']:
+                doc.add_paragraph(idea.get('title', '思路')).bold = True
+                doc.add_paragraph(idea.get('desc', ''))
+
         # Suggestions
-        doc.add_heading('详细修改建议', 1)
+        doc.add_heading('详细修改建议与升格示例', 1)
         suggestions = advice_data.get('suggestions', [])
         for i, sug in enumerate(suggestions):
             p = doc.add_paragraph()
-            p.add_run(f"{i+1}. ").bold = True
-            if sug.get('original'):
-                p.add_run(f"原文：{sug['original']}\n").italic = True
+            p.add_run(f"{i+1}. [{sug.get('technique', '建议')}] ").bold = True
             
-            # Remove markdown bold for docx readability or parse it?
-            # Simple cleanup for now
-            clean_sug = sug['suggestion'].replace('**', '').replace('__', '')
-            p.add_run(f"建议：{clean_sug}\n").bold = True
-            p.add_run(f"理由：{sug['reason']}")
+            if sug.get('original'):
+                p.add_run(f"\n原文：{sug['original']}").italic = True
+            
+            # Suggestion/Analysis
+            p.add_run(f"\n分析：{sug.get('suggestion', '')}")
+            
+            # Refined Text
+            if sug.get('refined_text'):
+                clean_ref = sug['refined_text'].replace('**', '').replace('__', '')
+                p.add_run(f"\n升格示例：{clean_ref}").bold = True
+
+        # Style Demonstrations
+        if advice_data.get('style_demonstrations'):
+            doc.add_heading('三种风格润色示范', 1)
+            for demo in advice_data['style_demonstrations']:
+                p = doc.add_paragraph()
+                p.add_run(demo.get('style_name', '风格')).bold = True
+                
+                # Check for nested examples list
+                examples = demo.get('examples', [])
+                # Fallback for old format
+                if not examples and demo.get('refined_text'):
+                    examples.append({
+                        "original_snippet": demo.get('original_snippet'),
+                        "refined_text": demo.get('refined_text'),
+                        "comment": demo.get('comment')
+                    })
+                
+                for i, ex in enumerate(examples):
+                    doc.add_paragraph(f"示例 {i+1}").bold = True
+                    if ex.get('original_snippet'):
+                        doc.add_paragraph(f"原文片段：{ex['original_snippet']}").italic = True
+                    doc.add_paragraph(f"升格内容：{ex.get('refined_text', '')}")
+                    if ex.get('comment'):
+                         doc.add_paragraph(f"解析：{ex['comment']}")
+                    doc.add_paragraph("") # Spacing between examples
+                
+                doc.add_paragraph("---") # Separator between styles
             
         fname = f"advice-{uuid.uuid4()}.docx"
         out_dir = os.path.join(os.getcwd(), "tts_output")
