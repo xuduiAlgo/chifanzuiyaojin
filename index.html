@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 语音工作台 (Alibaba Bailian)</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="header">
+        <h1 class="title">AI 语音工作台</h1>
+        <p class="subtitle">Powered by Alibaba CosyVoice-v1 & Qwen3-Max</p>
+      </header>
+
+      <!-- SETTINGS FIRST -->
+      <section class="card">
+        <h2 class="h2">API 设置</h2>
+        <div class="field">
+            <label class="label" for="dashscopeKey">Alibaba DashScope Key (必填)</label>
+            <input id="dashscopeKey" class="input" type="password" placeholder="sk-..." />
+            <div class="hint">
+                本项目所有功能（TTS, ASR, NLP）均依赖阿里云百炼 API。
+                <a href="https://dashscope.console.aliyun.com/apiKey" target="_blank" style="color: var(--primary);">获取 Key</a>
+            </div>
+        </div>
+      </section>
+
+      <!-- Tabs Navigation -->
+      <div class="tabs" style="margin-top: 24px;">
+          <button class="tab-btn active" data-target="tts-section">TTS 语音合成 (CosyVoice-v3-Plus)</button>
+          <button class="tab-btn" data-target="asr-section">ASR 语音识别 (Qwen3-Omni-Flash)</button>
+          <button class="tab-btn" data-target="ocr-section">OCR 文本识别 (Qwen-VL-OCR)</button>
+      </div>
+
+      <!-- TTS SECTION -->
+      <div id="tts-section" class="tab-content active">
+      <section class="card" style="margin-top: 0; border-top: none;">
+        
+        <label class="label" for="text">文本内容</label>
+        <textarea
+          id="text"
+          class="textarea"
+          rows="6"
+          placeholder="输入要朗读的文本..."
+        ></textarea>
+
+        <div class="row">
+          <div class="field">
+            <label class="label" for="pdfFile">导入文件 (PDF/Word/TXT)</label>
+            <input id="pdfFile" class="input" type="file" accept=".pdf,.docx,.txt" />
+          </div>
+          <div class="field">
+            <label class="label">&nbsp;</label>
+            <div style="display: flex; gap: 8px;">
+                <button id="importPdf" class="btn">导入文本 (自动修复标点)</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label class="label" for="sayVoice">选择音色</label>
+            <select id="sayVoice" class="select">
+              <option value="Cherry" selected>标准女声 (Cherry)</option>
+            </select>
+          </div>
+          <div class="field">
+             <label class="label" for="filename">输出文件名</label>
+             <input id="filename" class="input" placeholder="tts-output.wav" />
+          </div>
+        </div>
+        
+        <div class="field hidden" id="voicePromptField">
+            <label class="label" for="voicePrompt">声音描述 (Prompt)</label>
+            <input id="voicePrompt" class="input" placeholder="例如：一个年轻女孩兴奋地说话，语速很快..." />
+        </div>
+
+        <div class="actions">
+          <button id="generateAudio" class="btn primary">生成语音 (Qwen-TTS)</button>
+          <a id="downloadLink" class="btn disabled" href="#" download>下载音频</a>
+        </div>
+
+        <audio id="audioPlayer" class="audio" controls></audio>
+        
+        <!-- Highlight container -->
+        <div id="highlightContainer" class="highlight-container hidden" style="margin-top: 16px;"></div>
+
+        <!-- NLP Analysis -->
+        <div id="analysisSection" class="hidden" style="margin-top: 24px;">
+            <div class="divider"></div>
+            <div class="row" style="align-items: center; justify-content: space-between;">
+                <h2 class="h2" style="margin-bottom: 0;">AI 内容分析 (Qwen3-Max)</h2>
+                <button id="analyzeBtn" class="btn small">重新分析</button>
+            </div>
+            
+            <div style="margin-top: 12px;">
+                <div class="label">关键词</div>
+                <div id="analysisKeywords" style="display: flex; gap: 8px; flex-wrap: wrap;"></div>
+            </div>
+            
+            <div style="margin-top: 12px;">
+                <div class="label">全文摘要</div>
+                <div id="analysisSummary" class="subtitle" style="color: var(--text); line-height: 1.6;"></div>
+            </div>
+            
+            <div style="margin-top: 12px;">
+                <div class="label">主题分段 (点击跳转)</div>
+                <div id="analysisTopics" class="list" style="padding-left: 0; list-style: none;"></div>
+            </div>
+        </div>
+
+        <div class="status">
+          <span class="statusLabel">状态：</span>
+          <span id="statusText" class="statusText">就绪</span>
+        </div>
+      </section>
+      </div>
+
+      <!-- ASR SECTION -->
+      <div id="asr-section" class="tab-content hidden">
+      <section class="card" style="margin-top: 0; border-top: none;">
+        <p class="subtitle">上传音视频文件，自动切换 Qwen3-Omni-Flash 系列模型进行高精度转写。</p>
+        
+        <div class="row">
+          <div class="field">
+            <label class="label" for="asrFile">选择文件</label>
+            <input id="asrFile" class="input" type="file" accept="audio/*,video/*,.mkv" />
+          </div>
+          <div class="field">
+             <label class="label">&nbsp;</label>
+             <button id="startAsr" class="btn primary">开始转写</button>
+          </div>
+        </div>
+        
+        <div id="asrResultSection" class="hidden" style="margin-top: 16px;">
+             <div class="divider"></div>
+             
+             <!-- Player -->
+             <div style="margin-bottom: 16px;">
+                <label class="label">文件预览</label>
+                <audio id="asrAudioPlayer" class="audio" controls style="display:none;"></audio>
+                <video id="asrVideoPlayer" class="audio" controls style="display:none; max-height: 300px;"></video>
+             </div>
+
+             <!-- Analysis -->
+             <div id="asrAnalysis" style="margin-bottom: 16px; background: var(--bg-muted); padding: 12px; border-radius: 8px;">
+                <h3 class="h3" style="margin-top:0;">AI 分析结果</h3>
+                <div style="margin-top: 8px;">
+                    <span class="label">关键词：</span>
+                    <span id="asrKeywords"></span>
+                </div>
+                <div style="margin-top: 8px;">
+                    <span class="label">摘要：</span>
+                    <p id="asrSummary" style="margin: 4px 0 0; color: var(--text); font-size: 0.9em; line-height: 1.5;"></p>
+                </div>
+                <div style="margin-top: 8px;">
+                    <span class="label">主题分段：</span>
+                    <ul id="asrTopics" class="topic-list" style="padding-left: 20px; margin: 4px 0 0;"></ul>
+                </div>
+             </div>
+             
+             <!-- Transcript -->
+             <div class="field">
+                <label class="label">转写结果</label>
+                <div style="margin-bottom: 8px;">
+                    <button id="showAsrInteractive" class="btn small primary">交互模式</button>
+                    <button id="showAsrEditable" class="btn small">编辑模式</button>
+                </div>
+                
+                <div id="asrInteractive" class="highlight-container" style="max-height: 400px; overflow-y: auto;"></div>
+                <textarea id="asrText" class="textarea hidden" rows="10"></textarea>
+             </div>
+             
+             <div class="actions">
+                 <button id="exportAsrDoc" class="btn">导出 Word 文档</button>
+             </div>
+        </div>
+        
+        <div id="asrStatus" class="statusText" style="margin-top: 8px;"></div>
+      </section>
+      </div>
+
+      <!-- OCR SECTION -->
+      <div id="ocr-section" class="tab-content hidden">
+      <section class="card" style="margin-top: 0; border-top: none;">
+        <p class="subtitle">上传图片或 PDF，使用 Qwen-VL-OCR-2025-11-20 进行高精度识别并转换为 Word 文档。</p>
+        
+        <div class="row">
+          <div class="field">
+            <label class="label" for="ocrFile">添加图片/文档 (支持多次添加，按列表顺序拼接)</label>
+            <div style="display: flex; gap: 8px;">
+                <label class="btn small" for="ocrFile" style="cursor: pointer;">+ 添加文件</label>
+                <input id="ocrFile" type="file" accept=".pdf,.png,.jpg,.jpeg,.bmp" style="display: none;" />
+                <button id="clearOcrFiles" class="btn small">清空列表</button>
+            </div>
+            <!-- File Queue Display -->
+            <div id="ocrFileList" class="list" style="margin-top: 8px; min-height: 40px; border: 1px dashed var(--border); padding: 8px; border-radius: 4px; color: var(--muted); font-size: 0.9em;">
+                (暂无文件，请点击“添加文件”按钮)
+            </div>
+          </div>
+          <div class="field">
+             <label class="label">&nbsp;</label>
+             <button id="startOcr" class="btn primary">开始转换</button>
+          </div>
+        </div>
+        
+        <div id="ocrResult" class="hidden" style="margin-top: 12px;">
+             <label class="label">识别结果（可编辑）</label>
+             <textarea id="ocrResultText" class="textarea" rows="10" placeholder="OCR 识别结果将显示在这里..."></textarea>
+             
+             <div class="actions" style="margin-top: 12px;">
+                 <button id="generateWord" class="btn primary">保存并生成 Word 文档</button>
+                 <button id="getAiAdvice" class="btn">AI 建议 (作文润色)</button>
+            </div>
+            <div id="ocrStatus" class="hint" style="margin-top: 8px;"></div>
+             
+             <!-- AI Advice Result -->
+             <div id="adviceSection" class="hidden" style="margin-top: 16px; background: var(--bg-muted); padding: 16px; border-radius: 8px;">
+                 <h3 class="h3" style="margin-top: 0;">AI 润色建议 (Qwen3-Max)</h3>
+                 <div id="adviceAnalysis" style="margin-bottom: 12px; color: var(--text);"></div>
+                 <div id="adviceList" class="list"></div>
+                 <div class="actions" style="margin-top: 12px;">
+                     <button id="exportAdvice" class="btn small">导出建议为 Word</button>
+                 </div>
+             </div>
+        </div>
+      </section>
+      </div>
+      
+      <!-- Hidden controls for browser TTS compatibility if needed (removed for now to clean up) -->
+      <div class="hidden">
+        <select id="lang"><option value="auto">auto</option></select>
+        <select id="voice"></select>
+        <input id="rate" value="1.0">
+        <input id="pitch" value="1.0">
+        <input id="volume" value="1.0">
+        <button id="speak"></button>
+        <button id="pause"></button>
+        <button id="resume"></button>
+        <button id="stop"></button>
+      </div>
+
+    </main>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>
