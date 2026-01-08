@@ -2,6 +2,8 @@ const ui = {
   text: document.getElementById("text"),
   pdfFile: document.getElementById("pdfFile"),
   importPdf: document.getElementById("importPdf"),
+  urlInput: document.getElementById("urlInput"),
+  importUrl: document.getElementById("importUrl"),
   sayVoice: document.getElementById("sayVoice"),
   filename: document.getElementById("filename"),
   generateAudio: document.getElementById("generateAudio"),
@@ -709,9 +711,27 @@ ui.ocrFile.addEventListener("change", () => {
         return;
     }
     
-    // Append
-    ocrFileQueue = ocrFileQueue.concat(files);
-    renderOcrFileList();
+    // Filter out large files (> 4MB)
+    const validFiles = [];
+    const tooLargeFiles = [];
+    
+    files.forEach(f => {
+        if (f.size > 4 * 1024 * 1024) { // 4MB
+            tooLargeFiles.push(f.name);
+        } else {
+            validFiles.push(f);
+        }
+    });
+    
+    if (tooLargeFiles.length > 0) {
+        alert(`以下文件超过 4MB 限制，无法添加（请压缩后重试）：\n${tooLargeFiles.join("\n")}`);
+    }
+    
+    if (validFiles.length > 0) {
+        // Append
+        ocrFileQueue = ocrFileQueue.concat(validFiles);
+        renderOcrFileList();
+    }
     
     // Reset input so same file can be added again if really needed (or just to allow change event)
     ui.ocrFile.value = "";
@@ -742,6 +762,23 @@ async function startOcr() {
   
   try {
       const res = await fetch("/api/ocr-to-word", { method: "POST", body: form });
+      
+      // Check for non-JSON response (e.g. 413 Payload Too Large)
+      if (!res.ok) {
+          if (res.status === 413) {
+              throw new Error("文件总大小超过服务器限制 (4.5MB)。请分批转换或压缩图片。");
+          }
+          const contentType = res.headers.get("content-type");
+          if (contentType && contentType.indexOf("application/json") !== -1) {
+             const errData = await res.json();
+             throw new Error(errData.error || `HTTP ${res.status}`);
+          } else {
+             const text = await res.text();
+             // Try to extract useful info or just return status
+             throw new Error(`HTTP ${res.status}: ${text.substring(0, 100)}...`);
+          }
+      }
+
       const data = await res.json();
       if (data.ok) {
           ui.ocrResult.classList.remove("hidden");
@@ -751,7 +788,11 @@ async function startOcr() {
           ui.ocrStatus.textContent = "错误: " + data.error;
       }
   } catch (e) {
-      ui.ocrStatus.textContent = "错误: " + e.message;
+      if (e.message.includes("Unexpected token")) {
+          ui.ocrStatus.textContent = "错误: 服务器返回了无效数据 (可能是文件过大导致超时或内存溢出)";
+      } else {
+          ui.ocrStatus.textContent = "错误: " + e.message;
+      }
   } finally {
       ui.startOcr.disabled = false;
       ui.startOcr.textContent = "开始转换";
@@ -1080,6 +1121,49 @@ async function importPdfText() {
     }
 }
 ui.importPdf.addEventListener("click", importPdfText);
+
+// --- Import URL ---
+async function importUrlText() {
+    const url = (ui.urlInput.value ?? "").trim();
+    const dashscopeKey = ui.dashscopeKey.value.trim();
+
+    if (!url) {
+        alert("请输入网址。");
+        return;
+    }
+    if (!dashscopeKey) {
+        alert("请先配置 Alibaba DashScope Key。");
+        return;
+    }
+
+    ui.importUrl.disabled = true;
+    ui.importUrl.textContent = "提取中...";
+    setStatus("正在从网址提取并排版...");
+
+    try {
+        const res = await fetch("/api/extract-url", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url, dashscopeKey })
+        });
+        const data = await res.json();
+        
+        if (data.ok) {
+            ui.text.value = data.text;
+            setStatus("导入成功！");
+        } else {
+            alert("导入失败: " + data.error);
+            setStatus("导入失败");
+        }
+    } catch (e) {
+        alert("错误: " + e.message);
+        setStatus("请求错误");
+    } finally {
+        ui.importUrl.disabled = false;
+        ui.importUrl.textContent = "导入";
+    }
+}
+ui.importUrl.addEventListener("click", importUrlText);
 
 // --- Init ---
 async function loadConfig() {

@@ -11,6 +11,7 @@ import unicodedata
 import asyncio
 import requests # Added for downloading TTS audio
 from http import HTTPStatus
+from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, send_from_directory
 
 # Third-party
@@ -20,28 +21,71 @@ from dashscope.audio.tts_v2 import SpeechSynthesizer as SpeechSynthesizerV2, Aud
 from dashscope.audio.asr import Transcription
 # from rapidocr_onnxruntime import RapidOCR # Removed
 import fitz  # PyMuPDF
-import cv2
-import numpy as np
+# import cv2 # Removed: heavy dependency not needed for current features
+# import numpy as np # Removed: implicitly used by libraries but not directly
 import docx
 from docx.shared import Pt
 from docx.oxml.ns import qn
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 
-app = Flask(__name__, static_folder='.')
+# Determine Static Folder based on current file location
+# This ensures it works even if cwd is different (e.g. Vercel)
+# root_dir = os.path.dirname(os.path.abspath(__file__))
+# app = Flask(__name__, static_folder=root_dir)
+
+# Vercel fix: When running via api/index.py, __file__ might be different or we need to point to correct static folder
+# chifanzuiyaojin is the directory where static files (index.html, app.js) reside.
+base_dir = os.path.dirname(os.path.abspath(__file__))
+app = Flask(__name__, static_folder=base_dir)
+root_dir = base_dir
+
+# Set Max Content Length to 4.5MB to match Vercel Serverless Function Limits
+# This ensures local dev behaves similarly to production
+app.config['MAX_CONTENT_LENGTH'] = 4.5 * 1024 * 1024 
 
 # --- Load Environment ---
 def load_env_file():
-    env_path = os.path.join(os.getcwd(), '.env')
-    if os.path.exists(env_path):
-        with open(env_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#'): continue
-                if '=' in line:
-                    k, v = line.split('=', 1)
-                    os.environ[k.strip()] = v.strip()
+    # Try current cwd first, then server.py dir
+    env_paths = [
+        os.path.join(os.getcwd(), '.env'),
+        os.path.join(root_dir, '.env'),
+        os.path.join(root_dir, '..', '.env') # Try parent if in subdir
+    ]
+    
+    for env_path in env_paths:
+        if os.path.exists(env_path):
+            with open(env_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'): continue
+                    if '=' in line:
+                        k, v = line.split('=', 1)
+                        if k.strip() not in os.environ: # Don't overwrite existing env
+                            os.environ[k.strip()] = v.strip()
+            break # Stop after finding first .env
 
 load_env_file()
+
+# --- Helper: Output Directory ---
+def get_output_dir():
+    # In Vercel (or read-only fs), use /tmp
+    # Check if we can write to cwd/tts_output
+    local_out = os.path.join(root_dir, "tts_output")
+    
+    # Simple check: try to create a dummy file
+    try:
+        os.makedirs(local_out, exist_ok=True)
+        test_file = os.path.join(local_out, ".write_test")
+        with open(test_file, "w") as f: f.write("ok")
+        os.remove(test_file)
+        return local_out
+    except:
+        # Fallback to tmp
+        tmp_out = os.path.join(tempfile.gettempdir(), "tts_output")
+        os.makedirs(tmp_out, exist_ok=True)
+        return tmp_out
+
+
 
 # --- Configuration ---
 # Models requested by user
@@ -53,7 +97,8 @@ MODEL_TTS = "qwen-tts-2025-05-22"
 # We will keep the order but ensure error handling switches to next.
 MODEL_ASR_LIST = ["qwen3-omni-flash", "qwen3-omni-flash-2025-09-15", "qwen3-omni-flash-2025-12-01"]
 MODEL_ASR_FILE = MODEL_ASR_LIST[0] # Default
-MODEL_LLM = "qwen3-max-2025-09-23"
+MODEL_LLM = "qwen-plus" # Changed from qwen3-max to qwen-plus for speed/timeout balance
+MODEL_LLM_FAST = "qwen-turbo" # For high-speed tasks (punctuation, formatting)
 MODEL_OCR = "qwen-vl-ocr-2025-11-20"
 
 MAX_TTS_TEXT_LENGTH = 500_000
@@ -540,11 +585,11 @@ def call_llm_fix_punctuation(text, api_key):
     5. 【输出格式】：直接返回修复后的纯文本，不要包含任何解释、前言或后缀。
     
     文本：
-    {text[:8000]}
+    {text[:5000]} 
     """
     try:
         resp = dashscope.Generation.call(
-            model=MODEL_LLM,
+            model=MODEL_LLM_FAST, # Use Turbo for speed
             messages=[{'role': 'user', 'content': prompt}],
             result_format='message'
         )
@@ -683,10 +728,26 @@ def call_qwen_ocr(image_path, api_key):
 
 @app.route('/')
 def serve_index():
+    # Fallback to index.html in current directory if root_dir fails or for Vercel
+    if os.path.exists(os.path.join(root_dir, 'index.html')):
+        return send_from_directory(root_dir, 'index.html')
+    # Try parent directory or cwd
+    if os.path.exists(os.path.join(os.getcwd(), 'chifanzuiyaojin', 'index.html')):
+         return send_from_directory(os.path.join(os.getcwd(), 'chifanzuiyaojin'), 'index.html')
     return send_from_directory('.', 'index.html')
+
+@app.route('/tts_output/<path:filename>')
+def serve_tts_output(filename):
+    out_dir = get_output_dir()
+    return send_from_directory(out_dir, filename)
 
 @app.route('/<path:path>')
 def serve_static(path):
+    # Try root_dir first
+    if os.path.exists(os.path.join(root_dir, path)):
+        return send_from_directory(root_dir, path)
+    if os.path.exists(os.path.join(os.getcwd(), 'chifanzuiyaojin', path)):
+         return send_from_directory(os.path.join(os.getcwd(), 'chifanzuiyaojin'), path)
     return send_from_directory('.', path)
 
 @app.route('/api/voices', methods=['GET'])
@@ -723,8 +784,7 @@ def api_tts():
         
         # Filename setup
         filename = f"tts-{uuid.uuid4()}.wav"
-        out_dir = os.path.join(os.getcwd(), "tts_output")
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = get_output_dir()
         final_path = os.path.join(out_dir, filename)
         
         # Check length
@@ -993,8 +1053,7 @@ def api_generate_advice_word():
                 doc.add_paragraph("---") # Separator between styles
             
         fname = f"advice-{uuid.uuid4()}.docx"
-        out_dir = os.path.join(os.getcwd(), "tts_output")
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = get_output_dir()
         doc.save(os.path.join(out_dir, fname))
         
         return jsonify({"ok": True, "download_url": f"/tts_output/{fname}", "filename": fname})
@@ -1034,6 +1093,60 @@ def api_extract_text():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route('/api/extract-url', methods=['POST'])
+def api_extract_url():
+    data = request.get_json()
+    url = data.get('url')
+    if not url: return jsonify({"ok": False, "error": "missing_url"}), 400
+    
+    key = data.get("dashscopeKey") or os.environ.get("DASHSCOPE_API_KEY")
+    if not key: return jsonify({"ok": False, "error": "missing_api_key"}), 401
+
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding 
+        
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        # Extract Title
+        title = ""
+        if soup.title: title = soup.title.string
+        if not title:
+            h1 = soup.find('h1')
+            if h1: title = h1.get_text()
+            
+        # Extract Body
+        # Remove scripts and styles
+        for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            script.decompose()
+            
+        # Get text
+        text = soup.get_text(separator='\n')
+        
+        # Clean up lines
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        content_text = "\n".join(lines)
+        
+        # Combine
+        full_text = ""
+        if title: full_text += f"{title}\n\n"
+        full_text += content_text
+        
+        # Format using LLM
+        ok, formatted_text = call_llm_format_essay(full_text, key)
+        
+        if not ok:
+            formatted_text = normalize_text_for_tts(full_text)
+            
+        return jsonify({"ok": True, "text": formatted_text})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 def call_llm_format_essay(text, api_key):
     dashscope.api_key = api_key
     prompt = f"""
@@ -1053,11 +1166,11 @@ def call_llm_format_essay(text, api_key):
     6. **输出纯文本**：只返回排版后的文本内容，不要包含任何 JSON 格式、Markdown 标记或解释性语言。
     
     【待处理文本】：
-    {text[:10000]}
+    {text[:5000]}
     """
     try:
         resp = dashscope.Generation.call(
-            model=MODEL_LLM, # qwen3-max
+            model=MODEL_LLM_FAST, # Use Turbo for speed
             messages=[{'role': 'user', 'content': prompt}],
             result_format='message'
         )
@@ -1166,8 +1279,7 @@ def api_generate_word():
                 p.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
         
         fname = f"ocr-{uuid.uuid4()}.docx"
-        out_dir = os.path.join(os.getcwd(), "tts_output")
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = get_output_dir()
         doc.save(os.path.join(out_dir, fname))
         
         return jsonify({"ok": True, "download_url": f"/tts_output/{fname}", "filename": fname})
@@ -1200,8 +1312,7 @@ def api_asr_to_docx():
     doc.add_paragraph(data.get('transcript', ''))
     
     fname = f"asr-{uuid.uuid4()}.docx"
-    out_dir = os.path.join(os.getcwd(), "tts_output")
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = get_output_dir()
     doc.save(os.path.join(out_dir, fname))
     
     return jsonify({"ok": True, "download_url": f"/tts_output/{fname}", "filename": fname})

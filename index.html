@@ -60,6 +60,16 @@
         </div>
 
         <div class="row">
+          <div class="field" style="flex: 2;">
+            <label class="label" for="urlInput">从网址导入 (自动提取正文)</label>
+            <div style="display: flex; gap: 8px;">
+                <input id="urlInput" class="input" type="url" placeholder="https://example.com/article" />
+                <button id="importUrl" class="btn">导入</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
           <div class="field">
             <label class="label" for="sayVoice">选择音色</label>
             <select id="sayVoice" class="select">
