@@ -27,6 +27,11 @@ const ui = {
   ocrResult: document.getElementById("ocrResult"),
   ocrResultText: document.getElementById("ocrResultText"),
   generateWord: document.getElementById("generateWord"),
+  customPrompt: document.getElementById("customPrompt"),
+  submitCustomPrompt: document.getElementById("submitCustomPrompt"),
+  defaultPrompt1: document.getElementById("defaultPrompt1"),
+  defaultPrompt2: document.getElementById("defaultPrompt2"),
+  defaultPrompt3: document.getElementById("defaultPrompt3"),
   getAiAdvice: document.getElementById("getAiAdvice"),
   adviceSection: document.getElementById("adviceSection"),
   adviceAnalysis: document.getElementById("adviceAnalysis"),
@@ -848,8 +853,11 @@ async function getAiAdvice() {
     }
     
     const dashscopeKey = ui.dashscopeKey?.value;
+    const customPrompt = ui.customPrompt?.value?.trim();
     
     ui.getAiAdvice.disabled = true;
+    if (ui.submitCustomPrompt) ui.submitCustomPrompt.disabled = true;
+
     ui.getAiAdvice.textContent = "正在分析...";
     ui.adviceSection.classList.add("hidden");
     
@@ -857,50 +865,315 @@ async function getAiAdvice() {
         const res = await fetch("/api/ai-advice", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text, dashscopeKey })
+            body: JSON.stringify({ text, dashscopeKey, custom_prompt: customPrompt })
         });
         
         const data = await res.json();
         if (data.ok && data.data) {
             currentAdviceData = data.data;
             ui.adviceSection.classList.remove("hidden");
-            // 1. Score & Analysis
-            const scoreHtml = currentAdviceData.score_prediction 
-                ? `<div style="font-size: 1.2em; font-weight: bold; color: var(--primary); margin-bottom: 8px;">${currentAdviceData.score_prediction}</div>` 
-                : '';
-            ui.adviceAnalysis.innerHTML = scoreHtml + (currentAdviceData.analysis || "无总体评价");
             
-            // 2. Structure Advice (Restored)
-            const structDiv = document.createElement('div');
-            structDiv.style.margin = "16px 0";
-            structDiv.style.padding = "12px";
-            structDiv.style.background = "#f0f9ff";
-            structDiv.style.borderLeft = "4px solid #0ea5e9";
-            structDiv.innerHTML = `<h4 style="margin:0 0 8px 0;">🏗️ 写作思路与结构进阶</h4>
-                                   <div style="font-size:0.95em; white-space: pre-wrap;">${currentAdviceData.structure_advice || "暂无结构建议"}</div>`;
+            // Check if this is a custom format response (not the standard 5-section format)
+            const isCustomFormat = customPrompt && currentAdviceData.custom_format === true;
             
-            // 3. Alternative Ideas
-            const ideaDiv = document.createElement('div');
-            ideaDiv.style.margin = "16px 0";
-            ideaDiv.style.padding = "12px";
-            ideaDiv.style.background = "#fff7ed"; // Light orange
-            ideaDiv.style.borderLeft = "4px solid #f97316";
-            
-            let ideaHtml = `<h4 style="margin:0 0 12px 0; color:#c2410c;">💡 多维审题与构思拓展</h4>`;
-            (currentAdviceData.alternative_ideas || []).forEach(idea => {
-                ideaHtml += `<div style="margin-bottom:8px;">
-                                <div style="font-weight:bold; color:#ea580c;">${idea.title}</div>
-                                <div style="font-size:0.95em; color:#431407;">${idea.desc}</div>
-                             </div>`;
-            });
-            if (!currentAdviceData.alternative_ideas || currentAdviceData.alternative_ideas.length === 0) {
-                ideaHtml += `<div style="font-size:0.9em; color:#777;">（暂无构思建议）</div>`;
-            }
-            ideaDiv.innerHTML = ideaHtml;
+            if (isCustomFormat) {
+                // Handle custom format - just display the analysis as-is
+                ui.adviceAnalysis.innerHTML = `<div style="white-space: pre-wrap; line-height: 1.6;">${currentAdviceData.analysis || "无分析内容"}</div>`;
+                ui.adviceList.innerHTML = "";
+            } else if (customPrompt) {
+                // Custom prompt was used but AI returned standard format - show it with a note
+                ui.adviceAnalysis.innerHTML = `<div style="background: #fff3cd; padding: 10px; border-left: 4px solid #ffc107; margin-bottom: 16px;">
+                    <strong>注意：</strong>AI按照标准格式返回了分析结果。以下是详细分析：
+                </div>` + (currentAdviceData.analysis || "无总体评价");
+                
+                // Continue with standard format rendering...
+                ui.adviceList.innerHTML = "";
+                
+                // 2. Structure Advice
+                if (currentAdviceData.structure_advice) {
+                    const structDiv = document.createElement('div');
+                    structDiv.style.margin = "16px 0";
+                    structDiv.style.padding = "12px";
+                    structDiv.style.background = "#f0f9ff";
+                    structDiv.style.borderLeft = "4px solid #0ea5e9";
+                    structDiv.innerHTML = `<h4 style="margin:0 0 8px 0;">🏗️ 写作思路与结构进阶</h4>
+                                           <div style="font-size:0.95em; white-space: pre-wrap;">${currentAdviceData.structure_advice}</div>`;
+                    ui.adviceList.appendChild(structDiv);
+                }
+                
+                // 3. Alternative Ideas
+                if (currentAdviceData.alternative_ideas && currentAdviceData.alternative_ideas.length > 0) {
+                    const ideaDiv = document.createElement('div');
+                    ideaDiv.style.margin = "16px 0";
+                    ideaDiv.style.padding = "12px";
+                    ideaDiv.style.background = "#fff7ed";
+                    ideaDiv.style.borderLeft = "4px solid #f97316";
+                    
+                    let ideaHtml = `<h4 style="margin:0 0 12px 0; color:#c2410c;">💡 多维审题与构思拓展</h4>`;
+                    currentAdviceData.alternative_ideas.forEach(idea => {
+                        ideaHtml += `<div style="margin-bottom:8px;">
+                                        <div style="font-weight:bold; color:#ea580c;">${idea.title}</div>
+                                        <div style="font-size:0.95em; color:#431407;">${idea.desc}</div>
+                                     </div>`;
+                    });
+                    ideaDiv.innerHTML = ideaHtml;
+                    ui.adviceList.appendChild(ideaDiv);
+                }
+                
+                // 4. Detailed Suggestions
+                if (currentAdviceData.suggestions && currentAdviceData.suggestions.length > 0) {
+                    const listHeader = document.createElement('h4');
+                    listHeader.textContent = "✍️ 细节润色与手法升级";
+                    listHeader.style.margin = "20px 0 8px 0";
+                    ui.adviceList.appendChild(listHeader);
 
-            ui.adviceList.innerHTML = "";
-            ui.adviceList.appendChild(structDiv);
-            ui.adviceList.appendChild(ideaDiv);
+                    currentAdviceData.suggestions.forEach((item, idx) => {
+                        const div = document.createElement("div");
+                        div.style.marginBottom = "16px";
+                        div.style.padding = "12px";
+                        div.style.border = "1px solid var(--border)";
+                        div.style.borderRadius = "6px";
+                        div.style.background = "var(--bg)";
+                        
+                        let html = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                                        <strong>建议 ${idx+1}</strong>
+                                        <span style="font-size:0.85em; background:var(--bg-muted); padding:2px 6px; border-radius:4px; color:var(--primary);">${item.technique || "润色建议"}</span>
+                                    </div>`;
+                        
+                        if (item.original) {
+                            html += `<div style="color:var(--muted); font-size:0.9em; margin-bottom:6px; padding-left:8px; border-left:2px solid #ccc;">
+                                        原文：${item.original}
+                                     </div>`;
+                        }
+                        
+                        html += `<div style="margin-bottom:8px; font-size:0.95em;">
+                                    <strong>分析：</strong>${item.suggestion}
+                                 </div>`;
+                                 
+                        if (item.refined_text) {
+                            const highlighted = item.refined_text.replace(/\*\*(.*?)\*\*/g, '<span style="color:#d9534f; font-weight:bold;">$1</span>');
+                            html += `<div style="background:#fff1f0; padding:8px; border-radius:4px; border-left:3px solid #d9534f;">
+                                        <strong>🚀 升格示例：</strong>${highlighted}
+                                     </div>`;
+                        }
+                        
+                        div.innerHTML = html;
+                        ui.adviceList.appendChild(div);
+                    });
+                }
+                
+                // 5. Style Demonstrations
+                if (currentAdviceData.style_demonstrations && currentAdviceData.style_demonstrations.length > 0) {
+                    const styleHeader = document.createElement('h4');
+                    styleHeader.textContent = "🎨 三种风格润色示范 (每种风格 3 例)";
+                    styleHeader.style.margin = "24px 0 12px 0";
+                    ui.adviceList.appendChild(styleHeader);
+
+                    currentAdviceData.style_demonstrations.forEach(demo => {
+                        const card = document.createElement('div');
+                        card.style.marginBottom = "24px";
+                        card.style.padding = "16px";
+                        card.style.borderRadius = "8px";
+                        card.style.background = "#fff";
+                        card.style.boxShadow = "0 2px 8px rgba(0,0,0,0.08)";
+                        card.style.border = "1px solid #e5e7eb";
+
+                        // Style Title Color
+                        let titleColor = "#333";
+                        let badgeColor = "#e5e7eb";
+                        if (demo.style_name.includes("中考")) { titleColor = "#16a34a"; badgeColor = "#dcfce7"; } 
+                        else if (demo.style_name.includes("散文")) { titleColor = "#9333ea"; badgeColor = "#f3e8ff"; }
+                        else if (demo.style_name.includes("思辨")) { titleColor = "#2563eb"; badgeColor = "#dbeafe"; }
+
+                        let html = `<div style="display:flex; align-items:center; margin-bottom:12px; border-bottom: 2px solid ${badgeColor}; padding-bottom: 8px;">
+                                        <div style="font-weight:bold; font-size:1.2em; color:${titleColor};">${demo.style_name}</div>
+                                    </div>`;
+                        
+                        const examples = demo.examples || [];
+                        if (examples.length === 0 && demo.refined_text) {
+                            examples.push({
+                                original_snippet: demo.original_snippet,
+                                refined_text: demo.refined_text,
+                                comment: demo.comment
+                            });
+                        }
+
+                        examples.forEach((ex, i) => {
+                            html += `<div style="margin-bottom: 16px;">
+                                        <div style="font-size:0.9em; font-weight:bold; color:#555; margin-bottom:4px;">示例 ${i+1}</div>`;
+                            
+                            if (ex.original_snippet) {
+                                html += `<div style="font-size:0.9em; color:#666; margin-bottom:6px; font-style:italic; padding-left: 8px; border-left: 2px solid #ccc;">
+                                            原文：“${ex.original_snippet}”
+                                         </div>`;
+                            }
+                            
+                            html += `<div style="font-size:1em; line-height:1.6; color:#1f2937; margin-bottom:6px; padding:10px; background:${badgeColor}; border-radius:6px;">
+                                        ${ex.refined_text}
+                                     </div>`;
+                            
+                            if (ex.comment) {
+                                html += `<div style="font-size:0.85em; color:#6b7280;">
+                                            <span style="font-weight:bold;">解析：</span>${ex.comment}
+                                         </div>`;
+                            }
+                            html += `</div>`;
+                        });
+                        
+                        card.innerHTML = html;
+                        ui.adviceList.appendChild(card);
+                    });
+                }
+            } else {
+                // Standard format without custom prompt
+                // 1. Score & Analysis
+                const scoreHtml = currentAdviceData.score_prediction 
+                    ? `<div style="font-size: 1.2em; font-weight: bold; color: var(--primary); margin-bottom: 8px;">${currentAdviceData.score_prediction}</div>` 
+                    : '';
+                ui.adviceAnalysis.innerHTML = scoreHtml + (currentAdviceData.analysis || "无总体评价");
+                
+                // Rest of the standard format rendering...
+                ui.adviceList.innerHTML = "";
+                
+                // 2. Structure Advice
+                if (currentAdviceData.structure_advice) {
+                    const structDiv = document.createElement('div');
+                    structDiv.style.margin = "16px 0";
+                    structDiv.style.padding = "12px";
+                    structDiv.style.background = "#f0f9ff";
+                    structDiv.style.borderLeft = "4px solid #0ea5e9";
+                    structDiv.innerHTML = `<h4 style="margin:0 0 8px 0;">🏗️ 写作思路与结构进阶</h4>
+                                           <div style="font-size:0.95em; white-space: pre-wrap;">${currentAdviceData.structure_advice}</div>`;
+                    ui.adviceList.appendChild(structDiv);
+                }
+                
+                // 3. Alternative Ideas
+                if (currentAdviceData.alternative_ideas && currentAdviceData.alternative_ideas.length > 0) {
+                    const ideaDiv = document.createElement('div');
+                    ideaDiv.style.margin = "16px 0";
+                    ideaDiv.style.padding = "12px";
+                    ideaDiv.style.background = "#fff7ed";
+                    ideaDiv.style.borderLeft = "4px solid #f97316";
+                    
+                    let ideaHtml = `<h4 style="margin:0 0 12px 0; color:#c2410c;">💡 多维审题与构思拓展</h4>`;
+                    currentAdviceData.alternative_ideas.forEach(idea => {
+                        ideaHtml += `<div style="margin-bottom:8px;">
+                                        <div style="font-weight:bold; color:#ea580c;">${idea.title}</div>
+                                        <div style="font-size:0.95em; color:#431407;">${idea.desc}</div>
+                                     </div>`;
+                    });
+                    ideaDiv.innerHTML = ideaHtml;
+                    ui.adviceList.appendChild(ideaDiv);
+                }
+                
+                // 4. Detailed Suggestions
+                if (currentAdviceData.suggestions && currentAdviceData.suggestions.length > 0) {
+                    const listHeader = document.createElement('h4');
+                    listHeader.textContent = "✍️ 细节润色与手法升级";
+                    listHeader.style.margin = "20px 0 8px 0";
+                    ui.adviceList.appendChild(listHeader);
+
+                    currentAdviceData.suggestions.forEach((item, idx) => {
+                        const div = document.createElement("div");
+                        div.style.marginBottom = "16px";
+                        div.style.padding = "12px";
+                        div.style.border = "1px solid var(--border)";
+                        div.style.borderRadius = "6px";
+                        div.style.background = "var(--bg)";
+                        
+                        let html = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                                        <strong>建议 ${idx+1}</strong>
+                                        <span style="font-size:0.85em; background:var(--bg-muted); padding:2px 6px; border-radius:4px; color:var(--primary);">${item.technique || "润色建议"}</span>
+                                    </div>`;
+                        
+                        if (item.original) {
+                            html += `<div style="color:var(--muted); font-size:0.9em; margin-bottom:6px; padding-left:8px; border-left:2px solid #ccc;">
+                                        原文：${item.original}
+                                     </div>`;
+                        }
+                        
+                        html += `<div style="margin-bottom:8px; font-size:0.95em;">
+                                    <strong>分析：</strong>${item.suggestion}
+                                 </div>`;
+                                 
+                        if (item.refined_text) {
+                            const highlighted = item.refined_text.replace(/\*\*(.*?)\*\*/g, '<span style="color:#d9534f; font-weight:bold;">$1</span>');
+                            html += `<div style="background:#fff1f0; padding:8px; border-radius:4px; border-left:3px solid #d9534f;">
+                                        <strong>🚀 升格示例：</strong>${highlighted}
+                                     </div>`;
+                        }
+                        
+                        div.innerHTML = html;
+                        ui.adviceList.appendChild(div);
+                    });
+                }
+                
+                // 5. Style Demonstrations
+                if (currentAdviceData.style_demonstrations && currentAdviceData.style_demonstrations.length > 0) {
+                    const styleHeader = document.createElement('h4');
+                    styleHeader.textContent = "🎨 三种风格润色示范 (每种风格 3 例)";
+                    styleHeader.style.margin = "24px 0 12px 0";
+                    ui.adviceList.appendChild(styleHeader);
+
+                    currentAdviceData.style_demonstrations.forEach(demo => {
+                        const card = document.createElement('div');
+                        card.style.marginBottom = "24px";
+                        card.style.padding = "16px";
+                        card.style.borderRadius = "8px";
+                        card.style.background = "#fff";
+                        card.style.boxShadow = "0 2px 8px rgba(0,0,0,0.08)";
+                        card.style.border = "1px solid #e5e7eb";
+
+                        // Style Title Color
+                        let titleColor = "#333";
+                        let badgeColor = "#e5e7eb";
+                        if (demo.style_name.includes("中考")) { titleColor = "#16a34a"; badgeColor = "#dcfce7"; } 
+                        else if (demo.style_name.includes("散文")) { titleColor = "#9333ea"; badgeColor = "#f3e8ff"; }
+                        else if (demo.style_name.includes("思辨")) { titleColor = "#2563eb"; badgeColor = "#dbeafe"; }
+
+                        let html = `<div style="display:flex; align-items:center; margin-bottom:12px; border-bottom: 2px solid ${badgeColor}; padding-bottom: 8px;">
+                                        <div style="font-weight:bold; font-size:1.2em; color:${titleColor};">${demo.style_name}</div>
+                                    </div>`;
+                        
+                        const examples = demo.examples || [];
+                        if (examples.length === 0 && demo.refined_text) {
+                            examples.push({
+                                original_snippet: demo.original_snippet,
+                                refined_text: demo.refined_text,
+                                comment: demo.comment
+                            });
+                        }
+
+                        examples.forEach((ex, i) => {
+                            html += `<div style="margin-bottom: 16px;">
+                                        <div style="font-size:0.9em; font-weight:bold; color:#555; margin-bottom:4px;">示例 ${i+1}</div>`;
+                            
+                            if (ex.original_snippet) {
+                                html += `<div style="font-size:0.9em; color:#666; margin-bottom:6px; font-style:italic; padding-left: 8px; border-left: 2px solid #ccc;">
+                                            原文：“${ex.original_snippet}”
+                                         </div>`;
+                            }
+                            
+                            html += `<div style="font-size:1em; line-height:1.6; color:#1f2937; margin-bottom:6px; padding:10px; background:${badgeColor}; border-radius:6px;">
+                                        ${ex.refined_text}
+                                     </div>`;
+                            
+                            if (ex.comment) {
+                                html += `<div style="font-size:0.85em; color:#6b7280;">
+                                            <span style="font-weight:bold;">解析：</span>${ex.comment}
+                                         </div>`;
+                            }
+                            html += `</div>`;
+                        });
+                        
+                        card.innerHTML = html;
+                        ui.adviceList.appendChild(card);
+                    });
+                }
+            }
+            
+            // Scroll to advice
+            ui.adviceSection.scrollIntoView({ behavior: "smooth" });
 
             // 4. Detailed Suggestions
             const listHeader = document.createElement('h4');
@@ -1020,6 +1293,7 @@ async function getAiAdvice() {
         alert("请求出错: " + e.message);
     } finally {
         ui.getAiAdvice.disabled = false;
+        if (ui.submitCustomPrompt) ui.submitCustomPrompt.disabled = false;
         ui.getAiAdvice.textContent = "AI 建议 (作文润色)";
     }
 }
@@ -1061,6 +1335,35 @@ async function exportAdvice() {
 }
 
 ui.getAiAdvice.addEventListener("click", getAiAdvice);
+if (ui.submitCustomPrompt) {
+    ui.submitCustomPrompt.addEventListener("click", getAiAdvice);
+}
+
+// Default custom prompt buttons
+if (ui.defaultPrompt1) {
+    ui.defaultPrompt1.addEventListener("click", () => {
+        const defaultPrompt = "以中考阅卷专家组的视角，来评价这名预初学生的作文内容。既要对写的好的地方，无论是用词用句还是行文结构，都可以提出表扬。或者列出作文中最大的top5的加分项。于此同时也给出全文最大的top5减分项和不足。在针对top5的减分项给出具体的修改建议。";
+        ui.customPrompt.value = defaultPrompt;
+        // Auto-trigger the analysis
+        getAiAdvice();
+    });
+}
+
+if (ui.defaultPrompt2) {
+    ui.defaultPrompt2.addEventListener("click", () => {
+        const defaultPrompt = "请重点分析这篇作文的结构安排，包括开头结尾的设计、段落之间的过渡、情节发展的逻辑性，并给出具体的结构优化建议。";
+        ui.customPrompt.value = defaultPrompt;
+        getAiAdvice();
+    });
+}
+
+if (ui.defaultPrompt3) {
+    ui.defaultPrompt3.addEventListener("click", () => {
+        const defaultPrompt = "请重点对这篇作文进行语言润色，包括词语选择、句式变化、修辞手法等方面，提供具体的修改建议和升格示例。";
+        ui.customPrompt.value = defaultPrompt;
+        getAiAdvice();
+    });
+}
 ui.exportAdvice.addEventListener("click", exportAdvice);
 
 ui.generateWord.addEventListener("click", generateWord);

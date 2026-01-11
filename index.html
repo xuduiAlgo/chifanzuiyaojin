@@ -222,6 +222,29 @@
              
              <div class="actions" style="margin-top: 12px;">
                  <button id="generateWord" class="btn primary">保存并生成 Word 文档</button>
+            </div>
+
+            <!-- Custom Prompt Section -->
+            <div style="margin-top: 16px; border: 1px dashed var(--border); padding: 12px; border-radius: 6px;">
+                <label class="label" for="customPrompt">自定义润色要求 (可选)</label>
+                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                    <input id="customPrompt" class="input" placeholder="例如：请侧重环境描写，或者增加更多古诗词引用..." />
+                    <button id="submitCustomPrompt" class="btn" style="border: 1px solid #d9534f; color: #d9534f;">输入修改prompt建议</button>
+                </div>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <button id="defaultPrompt1" class="btn small" style="background: #f8f9fa; border: 1px solid #dee2e6; color: #495057;">
+                        中考阅卷专家组评价
+                    </button>
+                    <button id="defaultPrompt2" class="btn small" style="background: #f8f9fa; border: 1px solid #dee2e6; color: #495057;">
+                        侧重结构分析
+                    </button>
+                    <button id="defaultPrompt3" class="btn small" style="background: #f8f9fa; border: 1px solid #dee2e6; color: #495057;">
+                        重点润色建议
+                    </button>
+                </div>
+            </div>
+
+            <div class="actions" style="margin-top: 12px;">
                  <button id="getAiAdvice" class="btn">AI 建议 (作文润色)</button>
             </div>
             <div id="ocrStatus" class="hint" style="margin-top: 8px;"></div>

@@ -39,9 +39,9 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder=base_dir)
 root_dir = base_dir
 
-# Set Max Content Length to 4.5MB to match Vercel Serverless Function Limits
-# This ensures local dev behaves similarly to production
-app.config['MAX_CONTENT_LENGTH'] = 4.5 * 1024 * 1024 
+# Set Max Content Length - Unlimited for local use
+# Vercel limits were 4.5MB, but now we are free
+app.config['MAX_CONTENT_LENGTH'] = None  
 
 # --- Load Environment ---
 def load_env_file():
@@ -89,7 +89,7 @@ def get_output_dir():
 
 # --- Configuration ---
 # Models requested by user
-MODEL_TTS = "qwen-tts-2025-05-22"
+MODEL_TTS_LIST = ["qwen-tts", "qwen-tts-latest"]
 # ASR Models Priority List
 # Note: qwen-audio-asr and qwen-audio-asr-latest might strictly require OSS URLs or have different input constraints compared to turbo.
 # qwen-audio-turbo-1204 is known to work with local file upload wrapper.
@@ -97,8 +97,8 @@ MODEL_TTS = "qwen-tts-2025-05-22"
 # We will keep the order but ensure error handling switches to next.
 MODEL_ASR_LIST = ["qwen3-omni-flash", "qwen3-omni-flash-2025-09-15", "qwen3-omni-flash-2025-12-01"]
 MODEL_ASR_FILE = MODEL_ASR_LIST[0] # Default
-MODEL_LLM = "qwen-plus" # Changed from qwen3-max to qwen-plus for speed/timeout balance
-MODEL_LLM_FAST = "qwen-turbo" # For high-speed tasks (punctuation, formatting)
+MODEL_LLM = "qwen3-max-2025-09-23" # Reverted to high-accuracy model
+MODEL_LLM_FAST = "qwen3-max-2025-09-23" # Use Max for everything now that speed isn't a constraint
 MODEL_OCR = "qwen-vl-ocr-2025-11-20"
 
 MAX_TTS_TEXT_LENGTH = 500_000
@@ -228,55 +228,83 @@ class AlibabaTTSBackend:
         
         dashscope.api_key = self.api_key
         
-        # Determine parameters
-        model = MODEL_TTS
         voice_id = voice
+        last_error = None
         
-        try:
-            # Use MultiModalConversation for qwen-tts
-            print(f"TTS Call: model={model}, voice={voice_id}, text_len={len(text)}", file=sys.stderr)
-            
-            response = MultiModalConversation.call(
-                model=model,
-                text=text,
-                voice=voice_id,
-            )
-            
-            if response.status_code == HTTPStatus.OK:
-                # qwen-tts returns an audio URL in output.audio.url
-                if hasattr(response.output, 'audio') and 'url' in response.output.audio:
-                    audio_url = response.output.audio['url']
+        for model in MODEL_TTS_LIST:
+            # Retry logic for TTS API per model
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Use MultiModalConversation for qwen-tts
+                    print(f"TTS Call (Model: {model}, Attempt {attempt+1}/{max_retries}): voice={voice_id}, text_len={len(text)}", file=sys.stderr)
                     
-                    # Download the audio
-                    r = requests.get(audio_url)
-                    r.raise_for_status()
+                    response = MultiModalConversation.call(
+                        model=model,
+                        text=text,
+                        voice=voice_id,
+                    )
                     
-                    with open(output_path, "wb") as f:
-                        f.write(r.content)
+                    if response.status_code == HTTPStatus.OK:
+                        # qwen-tts returns an audio URL in output.audio.url
+                        if hasattr(response.output, 'audio') and 'url' in response.output.audio:
+                            audio_url = response.output.audio['url']
+                            
+                            # Download the audio
+                            r = requests.get(audio_url)
+                            r.raise_for_status()
+                            
+                            with open(output_path, "wb") as f:
+                                f.write(r.content)
+                                
+                            # Fake subtitles (Estimate)
+                            duration = get_audio_duration(output_path)
+                            raw_subs = estimate_subtitles_helper(text, duration)
+                            subtitles = []
+                            for s in raw_subs:
+                                subtitles.append({
+                                    "text": s['text'],
+                                    "start": s['begin_time'] / 1000.0,
+                                    "end": s['end_time'] / 1000.0
+                                })
+                            return True, None, subtitles
+                        else:
+                            last_error = f"Unexpected response format from {model}: {response}"
+                            print(last_error, file=sys.stderr)
+                            break # Try next model
+                    else:
+                        if "free tier of the model has been exhausted" in str(response.message):
+                             return False, "阿里云DashScope Qwen-TTS模型免费额度已耗尽。请前往阿里云控制台开启“按量付费”或购买资源包以继续使用。", None
                         
-                    # Fake subtitles (Estimate)
-                    duration = get_audio_duration(output_path)
-                    raw_subs = estimate_subtitles_helper(text, duration)
-                    subtitles = []
-                    for s in raw_subs:
-                        subtitles.append({
-                            "text": s['text'],
-                            "start": s['begin_time'] / 1000.0,
-                            "end": s['end_time'] / 1000.0
-                        })
-                    return True, None, subtitles
-                else:
-                    return False, f"Unexpected response format: {response}", None
-            else:
-                if "free tier of the model has been exhausted" in str(response.message):
-                     return False, "阿里云DashScope Qwen-TTS模型免费额度已耗尽。请前往阿里云控制台开启“按量付费”或购买资源包以继续使用。", None
-                return False, f"TTS API Error: {response.message}", None
-                
-        except Exception as e:
-            error_msg = str(e)
-            if "AllocationQuota.FreeTierOnly" in error_msg or "free tier" in error_msg.lower():
-                return False, "阿里云DashScope免费额度已耗尽。请前往阿里云控制台开启“按量付费”或购买资源包以继续使用。(错误代码: AllocationQuota.FreeTierOnly)", None
-            return False, error_msg, None
+                        # Check for 500 InternalError.Algo which might be transient
+                        if response.status_code == 500 and "InternalError.Algo" in str(response.message):
+                            print(f"TTS Transient Error ({model}): {response.message}, retrying...", file=sys.stderr)
+                            time.sleep(1 + attempt) # Backoff
+                            continue # Retry same model
+                        
+                        last_error = f"TTS API Error ({model}): {response.message}"
+                        print(last_error, file=sys.stderr)
+                        break # Try next model
+                        
+                except Exception as e:
+                    error_msg = str(e)
+                    if "AllocationQuota.FreeTierOnly" in error_msg or "free tier" in error_msg.lower():
+                        return False, "阿里云DashScope免费额度已耗尽。请前往阿里云控制台开启“按量付费”或购买资源包以继续使用。(错误代码: AllocationQuota.FreeTierOnly)", None
+                    
+                    # Check for 500 in exception message if wrapped
+                    if ("500" in error_msg and "InternalError" in error_msg) or \
+                       ("503" in error_msg) or \
+                       ("502" in error_msg) or \
+                       ("ConnectionError" in error_msg):
+                         print(f"TTS Exception ({model} - Transient?): {error_msg}, retrying...", file=sys.stderr)
+                         time.sleep(1 + attempt)
+                         continue # Retry same model
+                    
+                    last_error = f"Exception ({model}): {error_msg}"
+                    print(last_error, file=sys.stderr)
+                    break # Try next model
+        
+        return False, f"All TTS models failed. Last error: {last_error}", None
 
     def estimate_subtitles(self, text, duration):
         # Legacy method kept for compatibility if needed, but generate() uses helper now.
@@ -585,11 +613,11 @@ def call_llm_fix_punctuation(text, api_key):
     5. 【输出格式】：直接返回修复后的纯文本，不要包含任何解释、前言或后缀。
     
     文本：
-    {text[:5000]} 
+    {text[:15000]} 
     """
     try:
         resp = dashscope.Generation.call(
-            model=MODEL_LLM_FAST, # Use Turbo for speed
+            model=MODEL_LLM_FAST, # Now Qwen-Max
             messages=[{'role': 'user', 'content': prompt}],
             result_format='message'
         )
@@ -599,12 +627,36 @@ def call_llm_fix_punctuation(text, api_key):
     except Exception as e:
         return False, str(e)
 
-def call_llm_advice(text, api_key):
+def call_llm_advice(text, api_key, custom_prompt=None):
     dashscope.api_key = api_key
-    prompt = f"""
-    你是一位资深的上海中考语文阅卷组长及文学评论家。请根据【上海中考作文评分标准】，对以下学生作文进行全方位的深度辅导。
     
-    【任务目标】：请提供一份包含以下五个维度的完整诊断报告，缺一不可。
+    if custom_prompt:
+        # When custom prompt is provided, let it control the entire analysis
+        prompt = f"""
+        你是一位资深的上海中考语文阅卷组长及文学评论家。请根据【上海中考作文评分标准】，对以下学生作文进行专业评价。
+        
+        【用户特别要求 - 必须完全遵循】：
+        {custom_prompt}
+        
+        【重要说明】：
+        1. 上述用户要求具有最高优先级，请严格按照用户要求的格式和内容进行分析
+        2. 不要输出默认的五个维度结构，而是完全按照用户要求的格式
+        3. 如果用户要求top5加减分项，请明确列出并详细说明
+        4. 如果用户要求具体修改建议，请针对每个减分项给出详细改进方案
+        
+        【返回格式要求】：
+        请严格按照用户要求的格式返回纯文本结果，不要包含任何JSON格式或代码块标记。
+        直接输出用户要求的内容格式即可。
+        
+        【作文内容】：
+        {text[:8000]}
+        """
+    else:
+        # Default 5-section format when no custom prompt
+        prompt = f"""
+        你是一位资深的上海中考语文阅卷组长及文学评论家。请根据【上海中考作文评分标准】，对以下学生作文进行全方位的深度辅导。
+        
+        【任务目标】：请提供一份包含以下五个维度的完整诊断报告，缺一不可。
     
     1. **【评分与诊断】**：
        - 预估得分（满分60分）。
@@ -681,13 +733,19 @@ def call_llm_advice(text, api_key):
         )
         if resp.status_code == HTTPStatus.OK:
             content = resp.output.choices[0].message.content
-            # Strip markdown code blocks
-            content = re.sub(r'```json\s*|\s*```', '', content)
-            try:
-                return True, json.loads(content)
-            except:
-                # Try to salvage partial JSON or return raw text wrapped
-                return False, f"Invalid JSON: {content}"
+            
+            if custom_prompt:
+                # For custom prompts, return the raw text as analysis
+                return True, {"analysis": content, "custom_format": True}
+            else:
+                # For standard format, try to parse JSON
+                # Strip markdown code blocks
+                content = re.sub(r'```json\s*|\s*```', '', content)
+                try:
+                    return True, json.loads(content)
+                except:
+                    # Try to salvage partial JSON or return raw text wrapped
+                    return False, f"Invalid JSON: {content}"
         return False, resp.message
     except Exception as e:
         return False, str(e)
@@ -957,10 +1015,11 @@ def api_ai_advice():
     data = request.get_json()
     text = data.get('text', '')
     key = data.get('dashscopeKey') or os.environ.get("DASHSCOPE_API_KEY")
+    custom_prompt = data.get('custom_prompt')
     
     if not key: return jsonify({"ok": False, "error": "missing_api_key"}), 401
     
-    ok, res = call_llm_advice(text, key)
+    ok, res = call_llm_advice(text, key, custom_prompt)
     if not ok: return jsonify({"ok": False, "error": res}), 500
     
     return jsonify({"ok": True, "data": res})
@@ -1125,6 +1184,7 @@ def api_extract_url():
             script.decompose()
             
         # Get text
+        # separator='\n' helps to separate block elements
         text = soup.get_text(separator='\n')
         
         # Clean up lines
@@ -1136,9 +1196,8 @@ def api_extract_url():
         if title: full_text += f"{title}\n\n"
         full_text += content_text
         
-        # Format using LLM
+        # Format using LLM (No truncation logic needed for local)
         ok, formatted_text = call_llm_format_essay(full_text, key)
-        
         if not ok:
             formatted_text = normalize_text_for_tts(full_text)
             
@@ -1149,6 +1208,9 @@ def api_extract_url():
 
 def call_llm_format_essay(text, api_key):
     dashscope.api_key = api_key
+    # Increase prompt limit for local high-capacity model
+    safe_text = text[:20000] 
+    
     prompt = f"""
     你是一个专业的出版编辑。请对以下OCR识别出的作文文本进行严格的标准化排版和格式校对。
     
@@ -1166,11 +1228,11 @@ def call_llm_format_essay(text, api_key):
     6. **输出纯文本**：只返回排版后的文本内容，不要包含任何 JSON 格式、Markdown 标记或解释性语言。
     
     【待处理文本】：
-    {text[:5000]}
+    {safe_text}
     """
     try:
         resp = dashscope.Generation.call(
-            model=MODEL_LLM_FAST, # Use Turbo for speed
+            model=MODEL_LLM_FAST, # Now Qwen-Max
             messages=[{'role': 'user', 'content': prompt}],
             result_format='message'
         )
@@ -1286,36 +1348,6 @@ def api_generate_word():
         
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-
-def format_as_essay(text):
-    if not text: return ""
-    # Normalize newlines
-    text = re.sub(r'\n\s*\n', '\n\n', text)
-    return text.strip()
-
-@app.route('/api/asr-to-docx', methods=['POST'])
-def api_asr_to_docx():
-    # Export ASR result to Word
-    data = request.get_json()
-    doc = docx.Document()
-    doc.add_heading('ASR Report', 0)
-    
-    if data.get('summary'):
-        doc.add_heading('Summary', 1)
-        doc.add_paragraph(data['summary'])
-        
-    if data.get('keywords'):
-        doc.add_heading('Keywords', 1)
-        doc.add_paragraph(", ".join(data['keywords']))
-        
-    doc.add_heading('Transcript', 1)
-    doc.add_paragraph(data.get('transcript', ''))
-    
-    fname = f"asr-{uuid.uuid4()}.docx"
-    out_dir = get_output_dir()
-    doc.save(os.path.join(out_dir, fname))
-    
-    return jsonify({"ok": True, "download_url": f"/tts_output/{fname}", "filename": fname})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5173))
