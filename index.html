@@ -10,8 +10,15 @@
   <body>
     <main class="container">
       <header class="header">
-        <h1 class="title">AI 语音工作台</h1>
-        <p class="subtitle">Powered by Alibaba CosyVoice-v1 & Qwen3-Max</p>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <div>
+            <h1 class="title" style="margin: 0;">AI 语音工作台</h1>
+            <p class="subtitle" style="margin: 0;">Powered by Alibaba CosyVoice-v1 & Qwen3-Max</p>
+          </div>
+          <button id="historyBtn" class="btn" style="border-color: var(--primary); color: var(--primary); background: rgba(91, 140, 255, 0.1);">
+            📚 历史记录
+          </button>
+        </div>
       </header>
 
       <!-- SETTINGS FIRST -->
@@ -92,6 +99,17 @@
           <a id="downloadLink" class="btn disabled" href="#" download>下载音频</a>
         </div>
 
+        <!-- TTS Progress Bar -->
+        <div id="ttsProgressContainer" class="progress-container hidden">
+          <div class="progress-label">
+            <span id="ttsProgressLabel">预估完成时间</span>
+            <span id="ttsProgressPercent">0%</span>
+          </div>
+          <div class="progress-bar">
+            <div id="ttsProgressBar" class="progress-fill"></div>
+          </div>
+        </div>
+
         <audio id="audioPlayer" class="audio" controls></audio>
         
         <!-- Highlight container -->
@@ -141,6 +159,17 @@
           <div class="field">
              <label class="label">&nbsp;</label>
              <button id="startAsr" class="btn primary">开始转写</button>
+          </div>
+        </div>
+
+        <!-- ASR Progress Bar -->
+        <div id="asrProgressContainer" class="progress-container hidden">
+          <div class="progress-label">
+            <span id="asrProgressLabel">预估完成时间</span>
+            <span id="asrProgressPercent">0%</span>
+          </div>
+          <div class="progress-bar">
+            <div id="asrProgressBar" class="progress-fill"></div>
           </div>
         </div>
         
@@ -277,6 +306,32 @@
 
     </main>
 
+    <!-- History Modal -->
+    <div id="historyModal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="h2" style="margin: 0;">📚 历史记录</h2>
+                <button id="closeHistoryModal" class="btn small" style="border: none; font-size: 20px;">&times;</button>
+            </div>
+            <div id="historyList" class="history-list"></div>
+            <div id="historyEmpty" class="history-empty" style="text-align: center; padding: 40px; color: var(--muted);">
+                暂无历史记录
+            </div>
+        </div>
+    </div>
+
+    <!-- History Detail Modal -->
+    <div id="historyDetailModal" class="modal hidden">
+        <div class="modal-content modal-content-large">
+            <div class="modal-header">
+                <h2 class="h2" style="margin: 0;" id="historyDetailTitle">历史记录详情</h2>
+                <button id="closeHistoryDetailModal" class="btn small" style="border: none; font-size: 20px;">&times;</button>
+            </div>
+            <div id="historyDetailContent"></div>
+        </div>
+    </div>
+
     <script src="./app.js" defer></script>
+    <script src="./js/history-manager.js" defer></script>
   </body>
 </html>

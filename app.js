@@ -52,6 +52,15 @@ const ui = {
   showAsrEditable: document.getElementById("showAsrEditable"),
   exportAsrDoc: document.getElementById("exportAsrDoc"),
   asrStatus: document.getElementById("asrStatus"),
+  // Progress bar elements
+  ttsProgressContainer: document.getElementById("ttsProgressContainer"),
+  ttsProgressLabel: document.getElementById("ttsProgressLabel"),
+  ttsProgressPercent: document.getElementById("ttsProgressPercent"),
+  ttsProgressBar: document.getElementById("ttsProgressBar"),
+  asrProgressContainer: document.getElementById("asrProgressContainer"),
+  asrProgressLabel: document.getElementById("asrProgressLabel"),
+  asrProgressPercent: document.getElementById("asrProgressPercent"),
+  asrProgressBar: document.getElementById("asrProgressBar"),
 };
 
 const state = {
@@ -60,6 +69,45 @@ const state = {
   asrSubtitles: [],
   pdfJsReady: false
 };
+
+// --- Progress Bar Helper Functions ---
+
+function updateProgress(type, percentage, label = "预估完成时间") {
+  const container = type === 'tts' ? ui.ttsProgressContainer : ui.asrProgressContainer;
+  const progressBar = type === 'tts' ? ui.ttsProgressBar : ui.asrProgressBar;
+  const percentText = type === 'tts' ? ui.ttsProgressPercent : ui.asrProgressPercent;
+  const labelText = type === 'tts' ? ui.ttsProgressLabel : ui.asrProgressLabel;
+  
+  if (!container || !progressBar || !percentText) return;
+  
+  // Show container
+  container.classList.remove('hidden');
+  
+  // Update width
+  progressBar.style.width = `${percentage}%`;
+  percentText.textContent = `${Math.round(percentage)}%`;
+  labelText.textContent = label;
+  
+  // Update color based on percentage
+  progressBar.className = 'progress-fill active';
+  if (percentage < 30) {
+    progressBar.style.background = '#ff5b6b'; // Red
+  } else if (percentage < 70) {
+    progressBar.style.background = 'linear-gradient(90deg, #ff5b6b 0%, #ffa94d 100%)'; // Orange
+  } else if (percentage < 100) {
+    progressBar.style.background = 'linear-gradient(90deg, #ffa94d 0%, #22c55e 100%)'; // Yellow to Green
+  } else {
+    progressBar.style.background = '#22c55e'; // Green
+    progressBar.classList.remove('active'); // Remove animation when complete
+  }
+}
+
+function hideProgress(type) {
+  const container = type === 'tts' ? ui.ttsProgressContainer : ui.asrProgressContainer;
+  if (container) {
+    container.classList.add('hidden');
+  }
+}
 
 function setStatus(text) {
   if (ui.statusText) ui.statusText.textContent = text;
@@ -163,7 +211,13 @@ async function generateAudio() {
   
   setStatus("正在生成语音 (Qwen-TTS)...");
   
+  // Show progress bar
+  updateProgress('tts', 10, "正在准备生成...");
+  
   try {
+    // Update progress during processing
+    setTimeout(() => updateProgress('tts', 30, "正在发送请求..."), 300);
+    
     const res = await fetch("/api/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -183,6 +237,12 @@ async function generateAudio() {
     const data = await res.json();
     if (!data.ok) throw new Error(data.error);
     
+    // Update progress to show completion
+    updateProgress('tts', 100, "生成完成！");
+    
+    // Hide progress bar after a short delay
+    setTimeout(() => hideProgress('tts'), 1500);
+    
     // Success
     ui.audioPlayer.src = data.audio_url;
     ui.audioPlayer.play().catch(e => console.warn("Auto-play blocked:", e));
@@ -200,6 +260,19 @@ async function generateAudio() {
     }
     
     setStatus("生成成功！");
+    
+    // Save to history
+    const historyRecord = {
+        type: 'tts',
+        text: ui.text.value,
+        voice: ui.sayVoice.value,
+        filename: filename,
+        audioUrl: data.audio_url,
+        downloadFilename: data.download_filename,
+        subtitles: data.subtitles || [],
+        analysis: null // Will be filled after analysis completes
+    };
+    HistoryManager.saveHistory(historyRecord);
     
     // Trigger Analysis
     analyzeText();
@@ -323,6 +396,20 @@ async function analyzeText() {
             const s = Math.floor(seconds % 60);
             return `${m}分${s}秒`;
         };
+        
+        // Update the latest TTS history record with analysis data
+        const history = HistoryManager.getAllHistory();
+        if (history.length > 0 && history[0].type === 'tts' && !history[0].analysis) {
+            history[0].analysis = {
+                keywords: result.keywords || [],
+                summary: result.summary || "",
+                topics: result.topics || []
+            };
+            localStorage.setItem(HistoryManager.STORAGE_KEY, JSON.stringify(history));
+            
+            // Also try to update on server
+            HistoryManager.saveToServer(history[0]);
+        }
 
         (result.topics || []).forEach(topic => {
             const li = document.createElement("li");
@@ -443,20 +530,34 @@ async function startAsr() {
         return;
     }
 
-    ui.startAsr.disabled = true;
-    ui.startAsr.textContent = "转写中...";
-    ui.asrStatus.textContent = "正在上传并转写 (Qwen3-Omni-Flash)...";
-    ui.asrResultSection.classList.add("hidden");
+  ui.startAsr.disabled = true;
+  ui.startAsr.textContent = "转写中...";
+  ui.asrStatus.textContent = "正在上传并转写 (Qwen3-Omni-Flash)...";
+  ui.asrResultSection.classList.add("hidden");
 
-    const form = new FormData();
-    form.append("file", file);
-    form.append("dashscopeKey", dashscopeKey);
+  // Show progress bar
+  updateProgress('asr', 10, "正在准备上传...");
+  
+  const form = new FormData();
+  form.append("file", file);
+  form.append("dashscopeKey", dashscopeKey);
 
-    try {
-        const res = await fetch("/api/asr", { method: "POST", body: form });
-        const data = await res.json();
-        
-        if (!data.ok) throw new Error(data.error);
+  try {
+    // Update progress during upload
+    setTimeout(() => updateProgress('asr', 30, "正在上传文件..."), 300);
+    
+    const res = await fetch("/api/asr", { method: "POST", body: form });
+    
+    // Update progress during processing
+    updateProgress('asr', 60, "正在转写音频...");
+    
+    const data = await res.json();
+    
+    // Update progress to show completion
+    updateProgress('asr', 100, "转写完成！");
+    
+    // Hide progress bar after a short delay
+    setTimeout(() => hideProgress('asr'), 1500);
         
         ui.asrResultSection.classList.remove("hidden");
         ui.asrText.value = data.transcript;
@@ -600,6 +701,20 @@ async function startAsr() {
         }
         
         ui.asrStatus.textContent = "转写完成！";
+        
+        // Save to history
+        const historyRecord = {
+            type: 'asr',
+            filename: file.name,
+            audioUrl: blobUrl,
+            transcript: data.transcript,
+            subtitles: data.subtitles || [],
+            keywords: data.keywords || [],
+            summary: data.summary || "",
+            topics: data.topics || [],
+            analysis: data.analysis || null
+        };
+        HistoryManager.saveHistory(historyRecord);
         
     } catch (e) {
         ui.asrStatus.textContent = "错误: " + e.message;
@@ -1481,6 +1596,456 @@ async function loadConfig() {
     } catch (e) {
         console.warn("Failed to load config:", e);
     }
+}
+
+// --- History Management ---
+
+// History UI Elements
+const historyUi = {
+  btn: document.getElementById("historyBtn"),
+  modal: document.getElementById("historyModal"),
+  detailModal: document.getElementById("historyDetailModal"),
+  closeBtn: document.getElementById("closeHistoryModal"),
+  closeDetailBtn: document.getElementById("closeHistoryDetailModal"),
+  list: document.getElementById("historyList"),
+  empty: document.getElementById("historyEmpty"),
+  detailTitle: document.getElementById("historyDetailTitle"),
+  detailContent: document.getElementById("historyDetailContent")
+};
+
+// Open history modal
+historyUi.btn.addEventListener("click", () => {
+  historyUi.modal.classList.remove("hidden");
+  renderHistoryList();
+});
+
+// Close history modal
+historyUi.closeBtn.addEventListener("click", () => {
+  historyUi.modal.classList.add("hidden");
+});
+
+// Close detail modal
+historyUi.closeDetailBtn.addEventListener("click", () => {
+  historyUi.detailModal.classList.add("hidden");
+});
+
+// Close modals on outside click
+historyUi.modal.addEventListener("click", (e) => {
+  if (e.target === historyUi.modal) {
+    historyUi.modal.classList.add("hidden");
+  }
+});
+
+historyUi.detailModal.addEventListener("click", (e) => {
+  if (e.target === historyUi.detailModal) {
+    historyUi.detailModal.classList.add("hidden");
+  }
+});
+
+// Render history list
+function renderHistoryList() {
+  const history = HistoryManager.getAllHistory();
+  
+  if (history.length === 0) {
+    historyUi.list.innerHTML = "";
+    historyUi.empty.classList.remove("hidden");
+    return;
+  }
+  
+  historyUi.empty.classList.add("hidden");
+  historyUi.list.innerHTML = "";
+  
+  history.forEach(record => {
+    const item = document.createElement("div");
+    item.className = "history-item";
+    
+    const typeLabel = HistoryManager.getTypeLabel(record.type);
+    const dateLabel = HistoryManager.formatDate(record.createdAt);
+    
+    // Get keywords and summary based on record type
+    let keywords = [];
+    let summary = "";
+    
+    if (record.type === 'tts') {
+      keywords = record.analysis?.keywords || [];
+      summary = record.analysis?.summary || "";
+    } else if (record.type === 'asr') {
+      keywords = record.keywords || [];
+      summary = record.summary || "";
+    }
+    
+    // Get title based on record type
+    let title = "";
+    if (record.type === 'tts') {
+      title = record.filename || "未命名音频";
+    } else if (record.type === 'asr') {
+      title = record.filename || "未命名音频";
+    }
+    
+    // Build keywords HTML
+    const keywordsHtml = keywords.length > 0 
+      ? keywords.slice(0, 5).map(kw => `<span class="history-item-keyword">${kw}</span>`).join("")
+      : "";
+    
+    // Build summary HTML
+    const summaryHtml = summary 
+      ? `<div class="history-item-summary">${summary}</div>`
+      : `<div class="history-item-no-analysis">暂无分析结果</div>`;
+    
+    item.innerHTML = `
+      <div class="history-item-header">
+        <span class="history-item-type ${record.type}">${typeLabel}</span>
+        <span class="history-item-date">${dateLabel}</span>
+      </div>
+      <div class="history-item-title">${title}</div>
+      ${keywordsHtml ? `<div class="history-item-keywords">${keywordsHtml}</div>` : ""}
+      ${summaryHtml}
+      <div class="history-item-actions">
+        <button class="history-btn-delete" data-id="${record.id}">删除</button>
+      </div>
+    `;
+    
+    // Click to view details
+    item.addEventListener("click", (e) => {
+      if (!e.target.classList.contains("history-btn-delete")) {
+        openHistoryDetail(record);
+      }
+    });
+    
+    // Delete button
+    const deleteBtn = item.querySelector(".history-btn-delete");
+    deleteBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (confirm("确定要删除这条历史记录吗？")) {
+        HistoryManager.deleteHistory(record.id);
+        renderHistoryList();
+      }
+    });
+    
+    historyUi.list.appendChild(item);
+  });
+}
+
+// Open history detail
+function openHistoryDetail(record) {
+  historyUi.detailModal.classList.remove("hidden");
+  
+  const typeLabel = HistoryManager.getTypeLabel(record.type);
+  const dateLabel = HistoryManager.formatDate(record.createdAt);
+  
+  historyUi.detailTitle.textContent = `${typeLabel} - ${record.filename || "详情"}`;
+  
+  let content = "";
+  
+  if (record.type === 'tts') {
+    content = renderTTSHistoryDetail(record);
+  } else if (record.type === 'asr') {
+    content = renderASRHistoryDetail(record);
+  }
+  
+  historyUi.detailContent.innerHTML = content;
+  
+  // Initialize player and subtitles for history detail
+  if (record.type === 'tts' || record.type === 'asr') {
+    initHistoryPlayer(record);
+  }
+}
+
+// Helper function to format time
+function formatTime(seconds) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}分${s}秒`;
+}
+
+// Render TTS history detail
+function renderTTSHistoryDetail(record) {
+  return `
+    <div class="history-detail-player">
+      <audio id="historyAudio" controls src="${record.audioUrl}"></audio>
+    </div>
+    
+    <div class="history-detail-info">
+      <div class="history-detail-info-row">
+        <span class="history-detail-info-label">创建时间：</span>
+        <span class="history-detail-info-value">${HistoryManager.formatDate(record.createdAt)}</span>
+      </div>
+      <div class="history-detail-info-row">
+        <span class="history-detail-info-label">音色：</span>
+        <span class="history-detail-info-value">${record.voice || "未知"}</span>
+      </div>
+      <div class="history-detail-info-row">
+        <span class="history-detail-info-label">文件名：</span>
+        <span class="history-detail-info-value">${record.filename || "未知"}</span>
+      </div>
+    </div>
+    
+    <div class="history-detail-content">
+      <div class="history-detail-section">
+        <div class="history-detail-section-title">📝 原文内容</div>
+        <div class="textarea" style="font-size: 14px; max-height: 200px; overflow-y: auto;">${record.text || "无内容"}</div>
+      </div>
+      
+      <div id="historyHighlightContainer" class="highlight-container" style="display: none;"></div>
+      
+      <div class="history-detail-section">
+        <div class="history-detail-section-title">🔍 AI 分析</div>
+        ${record.analysis ? `
+          <div style="margin-top: 12px;">
+            <div class="label">关键词</div>
+            <div id="historyAnalysisKeywords" style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;">
+              ${(record.analysis.keywords || []).map(kw => `<span class="keyword-tag" style="background: var(--bg-muted); padding: 4px 12px; border-radius: 12px; font-size: 12px;">${kw}</span>`).join("")}
+            </div>
+          </div>
+          
+          <div style="margin-top: 12px;">
+            <div class="label">全文摘要</div>
+            <div style="margin-top: 8px; color: var(--text); line-height: 1.6; font-size: 14px;">
+              ${record.analysis.summary || "无摘要"}
+            </div>
+          </div>
+          
+          <div style="margin-top: 12px;">
+            <div class="label">主题分段</div>
+            <ul id="historyAnalysisTopics" style="margin: 8px 0 0; padding-left: 18px; color: var(--text); font-size: 14px; line-height: 1.7;">
+              ${(record.analysis.topics || []).map((topic, idx) => `
+                <li class="history-topic-item" style="margin: 8px 0; cursor: default;" data-topic-idx="${idx}">
+                  ${topic.title}
+                </li>
+              `).join("")}
+            </ul>
+          </div>
+        ` : "<p style='color: var(--muted);'>暂无分析结果</p>"}
+      </div>
+    </div>
+  `;
+}
+
+// Render ASR history detail
+function renderASRHistoryDetail(record) {
+  return `
+    <div class="history-detail-player">
+      ${record.audioUrl ? `<audio id="historyAudio" controls src="${record.audioUrl}"></audio>` : ""}
+    </div>
+    
+    <div class="history-detail-info">
+      <div class="history-detail-info-row">
+        <span class="history-detail-info-label">创建时间：</span>
+        <span class="history-detail-info-value">${HistoryManager.formatDate(record.createdAt)}</span>
+      </div>
+      <div class="history-detail-info-row">
+        <span class="history-detail-info-label">文件名：</span>
+        <span class="history-detail-info-value">${record.filename || "未知"}</span>
+      </div>
+      <div class="history-detail-info-row">
+        <span class="history-detail-info-label">转写文本长度：</span>
+        <span class="history-detail-info-value">${(record.transcript || "").length} 字符</span>
+      </div>
+    </div>
+    
+    <div class="history-detail-content">
+      <div class="history-detail-section">
+        <div class="history-detail-section-title">📝 转写结果</div>
+        <div id="historyHighlightContainer" class="highlight-container"></div>
+      </div>
+      
+      <div class="history-detail-section">
+        <div class="history-detail-section-title">🔍 AI 分析</div>
+        <div style="margin-top: 12px;">
+          <div class="label">关键词</div>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;">
+            ${(record.keywords || []).map(kw => `<span class="keyword-tag" style="background: var(--bg-muted); padding: 4px 12px; border-radius: 12px; font-size: 12px; margin-right: 8px;">${kw}</span>`).join("")}
+          </div>
+        </div>
+        
+        <div style="margin-top: 12px;">
+          <div class="label">摘要</div>
+          <p style="margin: 8px 0 0; color: var(--text); font-size: 0.9em; line-height: 1.5;">
+            ${record.summary || "无摘要"}
+          </p>
+        </div>
+        
+        <div style="margin-top: 12px;">
+          <div class="label">主题分段</div>
+          <ul id="historyTopics" class="topic-list" style="padding-left: 20px; margin: 4px 0 0;">
+            ${(record.topics || []).map(topic => `
+              <li style="margin: 8px 0;">${topic.title}</li>
+            `).join("")}
+          </ul>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// Initialize history player and subtitles
+function initHistoryPlayer(record) {
+  const audio = document.getElementById("historyAudio");
+  const highlightContainer = document.getElementById("historyHighlightContainer");
+  
+  if (!audio || !highlightContainer) return;
+  
+  const subtitles = record.subtitles || [];
+  const topics = record.type === 'tts' ? (record.analysis?.topics || []) : (record.topics || []);
+  
+  if (subtitles.length > 0) {
+    highlightContainer.style.display = "block";
+    highlightContainer.innerHTML = "";
+    
+    subtitles.forEach((sub, idx) => {
+      const span = document.createElement("span");
+      span.textContent = sub.text;
+      span.className = "word-span";
+      span.dataset.idx = idx;
+      span.dataset.start = sub.start;
+      span.dataset.end = sub.end;
+      highlightContainer.appendChild(span);
+    });
+    
+    // Time update
+    audio.addEventListener("timeupdate", () => {
+      const time = audio.currentTime;
+      const activeIdx = subtitles.findIndex(s => time >= s.start && time <= s.end);
+      
+      const currentActive = highlightContainer.querySelector(".word-span.active");
+      if (currentActive && currentActive.dataset.idx != activeIdx) {
+        currentActive.classList.remove("active");
+      }
+      
+      if (activeIdx !== -1) {
+        const target = highlightContainer.querySelector(`.word-span[data-idx="${activeIdx}"]`);
+        if (target) {
+          target.classList.add("active");
+          if (target.offsetTop > highlightContainer.scrollTop + highlightContainer.clientHeight - 50 || 
+              target.offsetTop < highlightContainer.scrollTop) {
+            target.scrollIntoView({ behavior: "smooth", block: "center" });
+          }
+        }
+      }
+    });
+    
+    // Click to seek
+    highlightContainer.addEventListener("click", (e) => {
+      const target = e.target.closest(".word-span");
+      if (!target) return;
+      const start = parseFloat(target.dataset.start);
+      if (!isNaN(start)) {
+        audio.currentTime = start;
+        audio.play();
+      }
+    });
+  } else {
+    highlightContainer.style.display = "none";
+  }
+  
+  // Initialize topic items with timestamps and click functionality
+  if (topics.length > 0) {
+    const topicsContainerId = record.type === 'tts' ? "historyAnalysisTopics" : "historyTopics";
+    const topicsContainer = document.getElementById(topicsContainerId);
+    
+    if (topicsContainer) {
+      topicsContainer.innerHTML = "";
+      
+      topics.forEach((topic, idx) => {
+        const li = document.createElement("li");
+        li.className = "history-topic-item";
+        li.dataset.topicIdx = idx;
+        
+        // Find timestamps based on snippets
+        let startT = 0, endT = 0;
+        let found = false;
+        
+        if (topic.start_snippet && subtitles.length > 0) {
+          // Normalize both strings
+          const cleanSnippet = topic.start_snippet.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "");
+          const snippetLen = Math.min(cleanSnippet.length, 15);
+          const searchStr = cleanSnippet.substring(0, snippetLen);
+          
+          // Find start subtitle
+          let matchIdx = -1;
+          
+          // 1. Try exact match of first few chars in clean text
+          matchIdx = subtitles.findIndex(s => {
+            const cleanSub = s.text.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "");
+            return cleanSub.includes(searchStr);
+          });
+          
+          // 2. Fuzzy fallback: sliding window across subtitles
+          if (matchIdx === -1) {
+            for (let i = 0; i < subtitles.length; i++) {
+              let combined = subtitles[i].text;
+              if (i + 1 < subtitles.length) combined += subtitles[i + 1].text;
+              if (i + 2 < subtitles.length) combined += subtitles[i + 2].text;
+              
+              const cleanCombined = combined.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "");
+              
+              if (cleanCombined.includes(searchStr)) {
+                matchIdx = i;
+                break;
+              }
+            }
+          }
+          
+          if (matchIdx !== -1) {
+            startT = subtitles[matchIdx].start;
+            found = true;
+            
+            if (topic.end_snippet) {
+              const cleanEnd = topic.end_snippet.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "").substring(0, 10);
+              let endMatchIdx = -1;
+              
+              // Try exact match first
+              endMatchIdx = subtitles.findIndex((s, idx) => idx > matchIdx && s.text.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "").includes(cleanEnd));
+              
+              // Fuzzy fallback for end time
+              if (endMatchIdx === -1) {
+                for (let i = matchIdx + 1; i < subtitles.length; i++) {
+                  let combined = subtitles[i].text;
+                  if (i + 1 < subtitles.length) combined += subtitles[i + 1].text;
+                  if (i + 2 < subtitles.length) combined += subtitles[i + 2].text;
+                  
+                  const cleanCombined = combined.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "");
+                  if (cleanCombined.includes(cleanEnd)) {
+                    endMatchIdx = i;
+                    break;
+                  }
+                }
+              }
+              
+              if (endMatchIdx !== -1) {
+                endT = subtitles[endMatchIdx].end;
+              }
+            }
+          }
+        }
+        
+        // Render
+        let timeInfo = "";
+        if (found) {
+          const timeStr = endT > startT ? `${formatTime(startT)}~${formatTime(endT)}` : `${formatTime(startT)}`;
+          timeInfo = `<span style="color:var(--primary); font-size:0.85em; margin-left:8px;">[${timeStr}]</span>`;
+          
+          // Bind click
+          li.style.cursor = "pointer";
+          li.title = `点击跳转到 ${formatTime(startT)}`;
+          li.addEventListener("click", () => {
+            audio.currentTime = startT;
+            audio.play();
+          });
+        } else {
+          timeInfo = `<span style="color:var(--muted); font-size:0.85em; margin-left:8px;">[未匹配]</span>`;
+        }
+        
+        li.innerHTML = `<span>${topic.title}</span>${timeInfo}`;
+        li.style.margin = "8px 0";
+        li.style.color = "var(--text)";
+        li.style.fontSize = "14px";
+        li.style.lineHeight = "1.7";
+        
+        topicsContainer.appendChild(li);
+      });
+    }
+  }
 }
 
 loadVoices();

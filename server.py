@@ -13,6 +13,7 @@ import requests # Added for downloading TTS audio
 from http import HTTPStatus
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, send_from_directory
+from datetime import datetime
 
 # Third-party
 import dashscope
@@ -84,6 +85,37 @@ def get_output_dir():
         tmp_out = os.path.join(tempfile.gettempdir(), "tts_output")
         os.makedirs(tmp_out, exist_ok=True)
         return tmp_out
+
+# --- Helper: History Storage ---
+def get_history_file():
+    # Use a JSON file to persist history on server
+    history_file = os.path.join(root_dir, "history.json")
+    if not os.path.exists(history_file):
+        # Try temp directory if root_dir is read-only
+        history_file = os.path.join(tempfile.gettempdir(), "chifanzuiyaojin_history.json")
+    return history_file
+
+def load_history():
+    try:
+        history_file = get_history_file()
+        if os.path.exists(history_file):
+            with open(history_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return []
+    except Exception as e:
+        print(f"Failed to load history: {e}", file=sys.stderr)
+        return []
+
+def save_history_to_file(history):
+    try:
+        history_file = get_history_file()
+        os.makedirs(os.path.dirname(history_file), exist_ok=True)
+        with open(history_file, 'w', encoding='utf-8') as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"Failed to save history: {e}", file=sys.stderr)
+        return False
 
 
 
@@ -1348,6 +1380,86 @@ def api_generate_word():
         
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+# --- History API Routes ---
+@app.route('/api/history', methods=['GET'])
+def api_get_history():
+    """Get all history records"""
+    history = load_history()
+    # Sort by createdAt descending
+    history.sort(key=lambda x: x.get('createdAt', ''), reverse=True)
+    return jsonify({"ok": True, "history": history})
+
+@app.route('/api/history', methods=['POST'])
+def api_save_history():
+    """Save a new history record"""
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        if 'type' not in data:
+            return jsonify({"ok": False, "error": "missing_type"}), 400
+        
+        history = load_history()
+        
+        # Create new record with ID and timestamp
+        new_record = {
+            "id": data.get('id') or str(int(datetime.now().timestamp())),
+            "type": data['type'],
+            "createdAt": data.get('createdAt') or datetime.now().isoformat(),
+            **data
+        }
+        
+        # Add to beginning of array
+        history.insert(0, new_record)
+        
+        # Limit to 200 records
+        if len(history) > 200:
+            history = history[:200]
+        
+        # Save to file
+        if save_history_to_file(history):
+            return jsonify({"ok": True, "record": new_record})
+        else:
+            return jsonify({"ok": False, "error": "failed_to_save"}), 500
+            
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route('/api/history', methods=['DELETE'])
+def api_delete_history():
+    """Delete a history record"""
+    try:
+        data = request.get_json()
+        record_id = data.get('id')
+        
+        if not record_id:
+            return jsonify({"ok": False, "error": "missing_id"}), 400
+        
+        history = load_history()
+        
+        # Filter out the record
+        new_history = [r for r in history if r.get('id') != record_id]
+        
+        # Save to file
+        if save_history_to_file(new_history):
+            return jsonify({"ok": True, "deleted": record_id})
+        else:
+            return jsonify({"ok": False, "error": "failed_to_delete"}), 500
+            
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route('/api/history/<record_id>', methods=['GET'])
+def api_get_history_record(record_id):
+    """Get a specific history record by ID"""
+    history = load_history()
+    record = next((r for r in history if r.get('id') == record_id), None)
+    
+    if record:
+        return jsonify({"ok": True, "record": record})
+    else:
+        return jsonify({"ok": False, "error": "not_found"}), 404
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5173))
