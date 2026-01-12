@@ -816,6 +816,11 @@ def call_qwen_ocr(image_path, api_key):
 
 # --- Routes ---
 
+@app.route('/health')
+def health_check():
+    """Health check endpoint for Docker and load balancers"""
+    return jsonify({"status": "ok", "service": "chifanzuiyaojin"})
+
 @app.route('/')
 def serve_index():
     # Fallback to index.html in current directory if root_dir fails or for Vercel

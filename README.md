@@ -2,7 +2,6 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9+-green.svg)](https://www.python.org/)
-[![Docker](https://img.shields.io/badge/docker-supported-blue.svg)](https://www.docker.com/)
 
 一个功能强大的多媒体内容处理平台，集成了文本转语音、语音识别、OCR 文字识别、AI 作文润色等智能功能。
 
@@ -51,23 +50,7 @@
 
 ## 🚀 快速开始
 
-### 使用 Docker（推荐）
-
-```bash
-# 克隆项目
-git clone https://github.com/xuduiAlgo/chifanzuiyaojin.git
-cd chifanzuiyaojin
-
-# 启动生产环境
-docker-compose up -d
-
-# 启动开发环境
-docker-compose --profile dev up -d
-```
-
-访问 `http://localhost:5173` 开始使用。
-
-### 使用本地 Python
+### 安装和运行
 
 ```bash
 # 安装依赖
@@ -91,6 +74,9 @@ python server.py
 - [用户指南](./docs/USER_GUIDE.md) - 详细的功能使用说明
 - [API 文档](./docs/API.md) - 完整的 API 接口文档
 - [性能分析](./docs/PERFORMANCE.md) - 性能优化方案和基准测试
+- [部署指南](./docs/DEPLOYMENT.md) - 完整的外部部署方案
+- [故障排查](./docs/TROUBLESHOOTING.md) - 常见问题解决方案
+- [macOS 部署](./README_MACOS.md) - macOS 专用快速部署指南
 
 ## 🏗️ 技术架构
 
@@ -127,10 +113,8 @@ python server.py
 - ✅ 批量处理支持
 
 ### 生产就绪
-- ✅ Docker 多阶段构建
-- ✅ Docker Compose 编排
 - ✅ 健康检查配置
-- ✅ Nginx 反向代理支持
+- ✅ 反向代理支持（可选）
 
 ## 📋 系统要求
 
@@ -156,9 +140,6 @@ chifanzuiyaojin/
 ├── server.py                   # 后端服务器
 ├── style.css                   # 样式文件
 ├── index.html                  # 主页面
-├── Dockerfile                  # 开发环境 Docker 配置
-├── Dockerfile.prod             # 生产环境 Docker 配置
-├── docker-compose.yml          # Docker Compose 编排
 ├── requirements.txt            # Python 依赖
 ├── js/                         # JavaScript 模块
 │   ├── error-handler.js       # 错误处理
