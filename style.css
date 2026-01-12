@@ -283,10 +283,6 @@ body {
   box-shadow: 0 4px 6px rgba(91, 140, 255, 0.25);
 }
 
-.tab-content {
-    /* Ensure content is block by default */
-}
-
 .tab-content.hidden {
   display: none !important;
 }
@@ -434,6 +430,7 @@ body {
   line-height: 1.6;
   display: -webkit-box;
   -webkit-line-clamp: 3;
+  line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
   text-overflow: ellipsis;
