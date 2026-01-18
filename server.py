@@ -14,6 +14,7 @@ from http import HTTPStatus
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, send_from_directory
 from datetime import datetime
+import yt_dlp
 
 # Third-party
 import dashscope
@@ -44,7 +45,99 @@ root_dir = base_dir
 # Vercel limits were 4.5MB, but now we are free
 app.config['MAX_CONTENT_LENGTH'] = None  
 
+# --- Logging Setup ---
+import logging
+from logging.handlers import RotatingFileHandler
+
+def setup_logging():
+    """配置日志系统，将日志写入文件"""
+    # 确保logs目录存在
+    logs_dir = os.path.join(root_dir, 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    
+    log_file = os.path.join(logs_dir, 'server.log')
+    
+    # 配置根日志记录器
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # 创建文件处理器（自动轮转，每个文件最大10MB，保留5个备份）
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setLevel(logging.INFO)
+    
+    # 创建控制台处理器
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    
+    # 设置日志格式
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # 添加处理器
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    # 捕获print输出的函数
+    class LogWriter:
+        """将print输出重定向到日志文件"""
+        def __init__(self, original_stderr):
+            self.original = original_stderr
+            self.log = logging.getLogger()
+            self.buffer = ""
+        
+        def write(self, message):
+            # 写入原始stderr
+            self.original.write(message)
+            self.original.flush()
+            
+            # 写入日志文件（只处理非空的行）
+            cleaned = message.strip()
+            if cleaned:
+                # 检测是否是HTTP访问日志，避免重复记录
+                if not (cleaned.startswith('127.0.0.1') or 
+                        cleaned.startswith('192.168.') or
+                        'HTTP/1.1' in cleaned):
+                    # 立即写入日志（不缓冲）
+                    self.log.info(cleaned)
+                    # 强制刷新日志文件
+                    for handler in self.log.handlers:
+                        if isinstance(handler, RotatingFileHandler):
+                            handler.flush()
+        
+        def flush(self):
+            self.original.flush()
+            # 刷新所有日志处理器
+            for handler in self.log.handlers:
+                handler.flush()
+    
+    # 保存原始stderr
+    original_stderr = sys.stderr
+    
+    # 重定向sys.stderr到我们的LogWriter
+    sys.stderr = LogWriter(original_stderr)
+    
+    # 测试日志是否正常工作
+    logging.info("=== Server Started ===")
+    logging.info("Logging system initialized. All stderr output will be captured.")
+    
+    return logger
+
+# 初始化日志系统
+app_logger = setup_logging()
+
 # --- Load Environment ---
+# Disable Flask's automatic dotenv loading since we load it manually
+os.environ['FLASK_SKIP_DOTENV'] = '1'
+
 def load_env_file():
     # Try current cwd first, then server.py dir
     env_paths = [
@@ -69,22 +162,10 @@ load_env_file()
 
 # --- Helper: Output Directory ---
 def get_output_dir():
-    # In Vercel (or read-only fs), use /tmp
-    # Check if we can write to cwd/tts_output
+    # Use project root directory's tts_output folder for persistent storage
     local_out = os.path.join(root_dir, "tts_output")
-    
-    # Simple check: try to create a dummy file
-    try:
-        os.makedirs(local_out, exist_ok=True)
-        test_file = os.path.join(local_out, ".write_test")
-        with open(test_file, "w") as f: f.write("ok")
-        os.remove(test_file)
-        return local_out
-    except:
-        # Fallback to tmp
-        tmp_out = os.path.join(tempfile.gettempdir(), "tts_output")
-        os.makedirs(tmp_out, exist_ok=True)
-        return tmp_out
+    os.makedirs(local_out, exist_ok=True)
+    return local_out
 
 # --- Helper: History Storage ---
 def get_history_file():
@@ -123,11 +204,15 @@ def save_history_to_file(history):
 # Models requested by user
 MODEL_TTS_LIST = ["qwen-tts", "qwen-tts-latest"]
 # ASR Models Priority List
-# Note: qwen-audio-asr and qwen-audio-asr-latest might strictly require OSS URLs or have different input constraints compared to turbo.
-# qwen-audio-turbo-1204 is known to work with local file upload wrapper.
-# If qwen-audio-asr fails with "does not support this input", it likely means it doesn't support the file:// wrapper or the format.
-# We will keep the order but ensure error handling switches to next.
-MODEL_ASR_LIST = ["qwen3-omni-flash", "qwen3-omni-flash-2025-09-15", "qwen3-omni-flash-2025-12-01"]
+# Primary models (standard ASR): qwen3-omni-flash with version dates
+# Fallback models (realtime ASR): qwen3-omni-flash-realtime with version dates
+# Note: Realtime models may have different API parameters, but the primary models are compatible with current implementation
+MODEL_ASR_LIST = [
+    "qwen3-omni-flash-2025-12-01",
+    "qwen3-omni-flash-2025-09-15",
+    "qwen3-omni-flash-realtime-2025-12-01",
+    "qwen3-omni-flash-realtime-2025-09-15"
+]
 MODEL_ASR_FILE = MODEL_ASR_LIST[0] # Default
 MODEL_LLM = "qwen3-max-2025-09-23" # Reverted to high-accuracy model
 MODEL_LLM_FAST = "qwen3-max-2025-09-23" # Use Max for everything now that speed isn't a constraint
@@ -151,6 +236,155 @@ def ensure_ffmpeg_in_path():
 
 ensure_ffmpeg_in_path()
 
+# --- Helper: URL Download ---
+def extract_url_from_text(text):
+    """
+    Extract URL from text that may include Chinese title.
+    Example: "【标题】https://b23.tv/xxx" or "标题 https://example.com"
+    """
+    # Try to find http:// or https:// URLs
+    url_match = re.search(r'https?://[^\s\]]+', text)
+    if url_match:
+        return url_match.group(0)
+    # If no http/https found, try to find b23.tv or other common patterns
+    b23_match = re.search(r'b23\.tv/[^\s\]]+', text)
+    if b23_match:
+        return 'https://' + b23_match.group(0)
+    return text
+
+def download_audio_video_from_url(url, output_dir):
+    """
+    Download audio/video from URL using yt-dlp or direct download.
+    Supports:
+    - Direct file URLs (mp3, wav, mp4, etc.)
+    - Video websites (B站, YouTube, etc.) via yt-dlp
+    - Text with Chinese title and URL (e.g., "【标题】https://b23.tv/xxx")
+    Returns: (success, downloaded_path, error, original_url)
+    """
+    original_url = url
+    
+    # Extract pure URL if text contains Chinese title or description
+    extracted_url = extract_url_from_text(url)
+    if extracted_url != url:
+        print(f"Extracted URL from text: {extracted_url}", file=sys.stderr)
+        url = extracted_url
+    
+    print(f"Downloading from URL: {url}", file=sys.stderr)
+    
+    # Check if this is a direct file URL (ends with common media extensions)
+    direct_file_extensions = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', 
+                            '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv']
+    is_direct_file = any(url.lower().endswith(ext) for ext in direct_file_extensions)
+    
+    if is_direct_file:
+        # Direct download using requests
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            print("Using direct download...", file=sys.stderr)
+            response = requests.get(url, headers=headers, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            # Get file extension from URL or Content-Type
+            ext = os.path.splitext(url)[1] if '.' in url.split('/')[-1] else '.mp3'
+            if not ext:
+                content_type = response.headers.get('content-type', '')
+                if 'audio' in content_type:
+                    ext = '.mp3'
+                elif 'video' in content_type:
+                    ext = '.mp4'
+                else:
+                    ext = '.mp3'
+            
+            # Save file
+            filename = f"asr-{uuid.uuid4()}{ext}"
+            output_path = os.path.join(output_dir, filename)
+            
+            with open(output_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            print(f"Direct download complete: {output_path}", file=sys.stderr)
+            return True, output_path, None, url
+            
+        except Exception as e:
+            error_msg = f"Direct download failed: {str(e)}"
+            print(error_msg, file=sys.stderr)
+            return False, None, error_msg, original_url
+    
+    else:
+        # Use yt-dlp for video websites
+        try:
+            print("Using yt-dlp for video site download...", file=sys.stderr)
+            
+            # Configure yt-dlp options to download video (not extract audio)
+            ydl_opts = {
+                # Explicitly download best video WITH audio (not just audio)
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best',
+                'outtmpl': os.path.join(output_dir, 'asr-%(id)s.%(ext)s'),
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': False,
+                'nocheckcertificate': True,
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                # Merge formats if video and audio are separate
+                'merge_output_format': 'mp4',
+                # Don't embed subtitles
+                'writesubtitles': False,
+                'writeautomaticsub': False,
+                # CRITICAL: Don't extract audio to mp3, keep original format
+                'postprocessors': [],  # Empty list to prevent audio extraction
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # Extract info first
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    return False, None, "无法解析此URL，请检查链接是否正确", original_url
+                
+                # Get video title for logging
+                video_title = info.get('title', 'Unknown')
+                print(f"Found video: {video_title}", file=sys.stderr)
+                
+                # Download
+                ydl.download([url])
+            
+            # Find downloaded file (yt-dlp adds extension - support both video and audio formats)
+            # IMPORTANT: Support both 'asr-' prefix (for converted files) and video ID (for original yt-dlp downloads)
+            supported_extensions = ['.mp4', '.webm', '.mkv', '.mp3', '.wav', '.m4a']
+            
+            # First try to find files with 'asr-' prefix (from our download template)
+            downloaded_files = [f for f in os.listdir(output_dir) 
+                             if f.startswith('asr-') and any(f.endswith(ext) for ext in supported_extensions)]
+            
+            if not downloaded_files:
+                # If no 'asr-' files found, look for files with video ID or recent downloads
+                # Get video ID from info dict for filename matching
+                video_id = info.get('id', '')
+                if video_id:
+                    # Look for files starting with video ID
+                    downloaded_files = [f for f in os.listdir(output_dir) 
+                                     if f.startswith(video_id) and any(f.endswith(ext) for ext in supported_extensions)]
+            
+            if downloaded_files:
+                # Get most recent file
+                downloaded_files.sort(key=lambda x: os.path.getmtime(os.path.join(output_dir, x)), reverse=True)
+                output_path = os.path.join(output_dir, downloaded_files[0])
+                print(f"yt-dlp download complete: {output_path}", file=sys.stderr)
+                return True, output_path, None, url
+            else:
+                return False, None, "下载失败：未找到下载的文件", url
+            
+        except yt_dlp.utils.DownloadError as e:
+            error_msg = f"下载失败：{str(e)}"
+            print(error_msg, file=sys.stderr)
+            return False, None, error_msg, original_url
+        except Exception as e:
+            error_msg = f"下载出错：{str(e)}"
+            print(error_msg, file=sys.stderr)
+            return False, None, error_msg, original_url
+
 def get_audio_duration(file_path):
     if not shutil.which("ffprobe"): return 0
     try:
@@ -161,6 +395,38 @@ def get_audio_duration(file_path):
     except:
         return 0
 
+def get_file_type(file_path):
+    """
+    Determine if a file is video or audio based on file extension and ffprobe.
+    Returns: 'video' or 'audio'
+    """
+    # First check file extension
+    video_extensions = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv']
+    audio_extensions = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma', '.aiff']
+    
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in video_extensions:
+        return 'video'
+    elif ext in audio_extensions:
+        return 'audio'
+    
+    # If extension is ambiguous, use ffprobe to check
+    if shutil.which("ffprobe"):
+        try:
+            cmd = ["ffprobe", "-v", "error", "-select_streams", "v", 
+                   "-show_entries", "stream=codec_type", 
+                   "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            if result.stdout.strip():
+                return 'video'
+            else:
+                return 'audio'
+        except:
+            pass
+    
+    # Default to audio
+    return 'audio'
+
 def convert_to_wav_16k(input_path, output_path):
     if not shutil.which("ffmpeg"): return False, "ffmpeg missing"
     try:
@@ -170,6 +436,69 @@ def convert_to_wav_16k(input_path, output_path):
         return True, None
     except Exception as e:
         return False, str(e)
+
+def convert_to_browser_compatible(input_path, original_ext):
+    """
+    Convert audio/video files to browser-compatible formats.
+    - Audio: convert to MP3 (widely supported)
+    - Video: keep as is if already MP4/WebM, otherwise convert to MP4
+    Returns: (success, converted_path, error)
+    """
+    if not shutil.which("ffmpeg"):
+        return False, None, "ffmpeg missing"
+    
+    try:
+        # Determine output format based on original file type
+        # Audio formats that should be converted
+        audio_formats = ['.m4a', '.wma', '.aac', '.flac', '.ogg', '.wav', '.aiff']
+        # Video formats - convert non-browser formats to MP4, keep MP4/WebM as is
+        video_formats_convert = ['.mkv', '.avi', '.mov', '.wmv', '.flv']
+        video_formats_keep = ['.mp4', '.webm']
+        
+        is_audio = original_ext.lower() in audio_formats
+        is_video_convert = original_ext.lower() in video_formats_convert
+        is_video_keep = original_ext.lower() in video_formats_keep
+        
+        # If already MP3 or MP4/WebM, no need to convert
+        if original_ext.lower() in ['.mp3'] or is_video_keep:
+            return True, input_path, None
+        
+        # Create temp file for conversion
+        fd, temp_path = tempfile.mkstemp(suffix='.mp3' if is_audio else '.mp4')
+        os.close(fd)
+        
+        if is_audio:
+            # Convert audio to MP3 (better browser support)
+            cmd = [
+                "ffmpeg", "-y", "-i", input_path,
+                "-codec:a", "libmp3lame",
+                "-q:a", "2",  # Good quality (0-9, lower is better)
+                temp_path
+            ]
+        elif is_video_convert:
+            # Convert video to MP4 (H.264 + AAC for best compatibility)
+            cmd = [
+                "ffmpeg", "-y", "-i", input_path,
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "23",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-movflags", "+faststart",  # Enable fast start for streaming
+                temp_path
+            ]
+        else:
+            # Unknown format, try to keep as is
+            return True, input_path, None
+        
+        # Run conversion
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        
+        return True, temp_path, None
+        
+    except Exception as e:
+        print(f"Conversion failed: {e}", file=sys.stderr)
+        return False, None, str(e)
 
 # --- Helper: Text Normalization ---
 def normalize_text_for_tts(text):
@@ -344,8 +673,10 @@ class AlibabaTTSBackend:
         pass
 
 # --- Backend: Alibaba ASR ---
-def run_ali_asr(file_path, api_key):
+def run_ali_asr(file_path, api_key, task_id):
+    """Run ASR with task ID for progress tracking"""
     dashscope.api_key = api_key
+    print(f"ASR [Task ID: {task_id}]: Starting ASR processing", file=sys.stderr)
     
     # 1. Compress/Extract to mp3
     compressed_path = file_path
@@ -408,8 +739,8 @@ def run_ali_asr(file_path, api_key):
 
     try:
         if duration <= CHUNK_DURATION:
-            # Direct call
-            ok, res = _call_qwen_audio(compressed_path)
+            # Direct call with task ID
+            ok, res = _call_qwen_audio(compressed_path, task_id)
             if not ok: return False, res
             
             # Clean (Basic Regex)
@@ -438,12 +769,12 @@ def run_ali_asr(file_path, api_key):
                 current_offset_ms = 0
                 
                 for i, chunk in enumerate(chunks):
-                    print(f"Processing chunk {i+1}/{len(chunks)}...", file=sys.stderr)
+                    print(f"ASR [Task ID: {task_id}]: Processing chunk {i+1}/{len(chunks)}...", file=sys.stderr)
                     
                     # Get exact duration of chunk for better alignment
                     chunk_dur = get_audio_duration(chunk)
                     
-                    ok, res = _call_qwen_audio(chunk)
+                    ok, res = _call_qwen_audio(chunk, task_id)
                     if not ok: 
                         print(f"Chunk {i} failed: {res}", file=sys.stderr)
                         final_text += f"\n[...片段 {i+1} 转写失败，内容缺失...]\n"
@@ -482,13 +813,14 @@ def run_ali_asr(file_path, api_key):
         if is_temp and os.path.exists(compressed_path):
             os.remove(compressed_path)
 
-def _call_qwen_audio(audio_path):
+def _call_qwen_audio(audio_path, task_id):
+    """Call Qwen Audio API with task ID"""
     # Try models in order
     last_error = ""
     
     for model_name in MODEL_ASR_LIST:
         try:
-            print(f"ASR Trying model: {model_name}", file=sys.stderr)
+            print(f"ASR [Task ID: {task_id}]: Trying model: {model_name}", file=sys.stderr)
             messages = [
                 {
                     "role": "user",
@@ -510,7 +842,7 @@ def _call_qwen_audio(audio_path):
             full_content = ""
             last_response = None
             
-            print(f"DEBUG: Starting stream for {model_name}", file=sys.stderr)
+            print(f"ASR [Task ID: {task_id}]: DEBUG: Starting stream for {model_name}", file=sys.stderr)
             
             for response in response_iterator:
                 last_response = response
@@ -551,7 +883,7 @@ def _call_qwen_audio(audio_path):
                     # Don't raise immediately, try to continue? No, stream error is fatal usually.
                     raise Exception(f"Stream Error: {response.message}")
             
-            print(f"DEBUG: Stream finished. Content len: {len(full_content)}", file=sys.stderr)
+            print(f"ASR [Task ID: {task_id}]: DEBUG: Stream finished. Content len: {len(full_content)}", file=sys.stderr)
             
             if full_content:
                 return True, full_content
@@ -945,22 +1277,64 @@ def api_asr():
     if 'file' not in request.files: return jsonify({"ok": False, "error": "missing_file"}), 400
     file = request.files['file']
     
+    # Generate unique task ID for this ASR request
+    task_id = str(uuid.uuid4())
+    print(f"ASR Request [Task ID: {task_id}]: Starting new ASR task", file=sys.stderr)
+    
     key = request.form.get("dashscopeKey") or os.environ.get("DASHSCOPE_API_KEY")
     # For ASR, we might need a key. If not provided in form (frontend update needed?), check ENV.
     # We will assume ENV is primary or frontend sends it.
     
     if not key: return jsonify({"ok": False, "error": "missing_api_key"}), 401
     
+    # Get file extension from original filename
+    file_ext = os.path.splitext(file.filename)[1] if file.filename else '.mp3'
+    
+    # Save uploaded file to persistent storage with browser-compatible format
+    out_dir = get_output_dir()
+    
+    # First, save to a temp location
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+        temp_path = temp_file.name
+        file.save(temp_path)
+    
+    # Convert to browser-compatible format if needed
+    converted_success, converted_path, convert_error = convert_to_browser_compatible(temp_path, file_ext)
+    
+    if not converted_success:
+        # If conversion failed, try to use original file
+        print(f"Conversion failed: {convert_error}, using original file", file=sys.stderr)
+        converted_path = temp_path
+        # Keep original extension
+        saved_filename = f"asr-{uuid.uuid4()}{file_ext}"
+    else:
+        # Use converted file (extension will be .mp3 or .mp4)
+        converted_ext = os.path.splitext(converted_path)[1]
+        saved_filename = f"asr-{uuid.uuid4()}{converted_ext}"
+    
+    # Save to persistent storage
+    saved_path = os.path.join(out_dir, saved_filename)
+    shutil.move(converted_path, saved_path)
+    
+    # Clean up temp file if it's different from converted path
+    if temp_path != converted_path and os.path.exists(temp_path):
+        os.remove(temp_path)
+    
+    # Detect file type (video or audio) based on final saved file
+    file_type = get_file_type(saved_path)
+    
+    # Process ASR with task ID
     with tempfile.TemporaryDirectory() as temp_dir:
+        # Copy to temp directory for processing (to avoid modifying the original)
         input_path = os.path.join(temp_dir, file.filename)
-        file.save(input_path)
+        shutil.copy2(saved_path, input_path)
         
-        ok, res = run_ali_asr(input_path, key)
+        ok, res = run_ali_asr(input_path, key, task_id)
         if not ok: return jsonify({"ok": False, "error": res}), 500
-        
+            
         # Parse Result
         # res structure from qwen3-asr-flash needs careful handling
-        # Assuming res is the result object from SDK
+        # Assuming res is result object from SDK
         
         # We need to extract transcript, subtitles, etc.
         # Since I cannot easily debug the exact response structure of qwen3-asr-flash without running it,
@@ -978,7 +1352,7 @@ def api_asr():
         else:
             sents = []
             # Maybe full text is in 'text' field?
-            # res might be the whole 'output' object from wait()
+            # res might be whole 'output' object from wait()
             pass
             
         if hasattr(res, 'text'): transcript = res.text
@@ -1013,6 +1387,9 @@ def api_asr():
             
         return jsonify({
             "ok": True,
+            "task_id": task_id,  # Return task ID to client
+            "audio_url": f"/tts_output/{saved_filename}",
+            "file_type": file_type,  # Added file_type field
             "transcript": transcript,
             "subtitles": subtitles,
             "keywords": keywords,
@@ -1020,6 +1397,116 @@ def api_asr():
             "topics": topics,
             "analysis": llm_data if ok_llm else None
         })
+
+@app.route('/api/asr-url', methods=['POST'])
+def api_asr_url():
+    """
+    ASR from URL endpoint.
+    Accepts a URL to audio/video file or video website (B站, YouTube, etc.),
+    downloads it, and performs ASR transcription.
+    """
+    try:
+        data = request.get_json()
+        url = data.get('url')
+        
+        if not url:
+            return jsonify({"ok": False, "error": "missing_url"}), 400
+        
+        key = data.get("dashscopeKey") or os.environ.get("DASHSCOPE_API_KEY")
+        if not key: return jsonify({"ok": False, "error": "missing_api_key"}), 401
+        
+        print(f"ASR-URL Request: URL={url}", file=sys.stderr)
+        
+        # Step 1: Download audio/video from URL
+        out_dir = get_output_dir()
+        success, downloaded_path, download_error, original_url = download_audio_video_from_url(url, out_dir)
+        
+        if not success:
+            return jsonify({"ok": False, "error": f"下载失败: {download_error}"}), 400
+        
+        # Step 2: Convert to browser-compatible format if needed
+        downloaded_ext = os.path.splitext(downloaded_path)[1]
+        converted_success, converted_path, convert_error = convert_to_browser_compatible(downloaded_path, downloaded_ext)
+        
+        if not converted_success:
+            print(f"Conversion failed: {convert_error}, using original file", file=sys.stderr)
+            converted_path = downloaded_path
+            saved_filename = os.path.basename(downloaded_path)
+        else:
+            converted_ext = os.path.splitext(converted_path)[1]
+            saved_filename = f"asr-{uuid.uuid4()}{converted_ext}"
+            # Move converted file to persistent storage
+            saved_path = os.path.join(out_dir, saved_filename)
+            shutil.move(converted_path, saved_path)
+            converted_path = saved_path
+        
+        # Clean up original downloaded file if it's different
+        if downloaded_path != converted_path and os.path.exists(downloaded_path):
+            os.remove(downloaded_path)
+        
+        # Step 3: Detect file type (video or audio)
+        file_type = get_file_type(converted_path)
+        
+        # Step 4: Process ASR
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Copy to temp directory for processing
+            input_path = os.path.join(temp_dir, saved_filename)
+            shutil.copy2(converted_path, input_path)
+            
+            ok, res = run_ali_asr(input_path, key)
+            if not ok: return jsonify({"ok": False, "error": res}), 500
+            
+            # Parse Result
+            transcript = ""
+            subtitles = []
+            
+            if hasattr(res, 'sentences'):
+                sents = res.sentences
+            elif isinstance(res, dict) and 'sentences' in res:
+                sents = res['sentences']
+            else:
+                sents = []
+                
+            if hasattr(res, 'text'): transcript = res.text
+            elif isinstance(res, dict) and 'text' in res: transcript = res['text']
+            
+            # Extract subtitles
+            if not subtitles and sents:
+                 for s in sents:
+                    text_s = s['text'] if isinstance(s, dict) else s.text
+                    start = s['begin_time'] if isinstance(s, dict) else s.begin_time
+                    end = s['end_time'] if isinstance(s, dict) else s.end_time
+                    subtitles.append({
+                        "text": text_s,
+                        "start": start / 1000.0,
+                        "end": end / 1000.0
+                    })
+            
+            # Analyze with LLM
+            ok_llm, llm_data = call_llm_analysis(transcript, key)
+            keywords = []
+            summary = ""
+            topics = []
+            if ok_llm:
+                keywords = llm_data.get("keywords", [])
+                summary = llm_data.get("summary", "")
+                topics = llm_data.get("topics", [])
+                
+            return jsonify({
+                "ok": True,
+                "audio_url": f"/tts_output/{saved_filename}",
+                "file_type": file_type,
+                "transcript": transcript,
+                "subtitles": subtitles,
+                "keywords": keywords,
+                "summary": summary,
+                "topics": topics,
+                "analysis": llm_data if ok_llm else None,
+                "source_url": original_url
+            })
+                
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 @app.route('/api/analyze-text', methods=['POST'])
 def api_analyze_text():
@@ -1455,6 +1942,103 @@ def api_delete_history():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route('/api/extract-audio', methods=['POST'])
+def api_extract_audio():
+    """
+    Extract audio from video file.
+    Returns URL of the extracted audio file.
+    The extracted audio file will be much smaller than the original video file.
+    """
+    try:
+        data = request.get_json()
+        video_url = data.get('video_url')
+        
+        if not video_url:
+            return jsonify({"ok": False, "error": "missing_video_url"}), 400
+        
+        # Get the file path from the URL
+        # Support both relative and absolute URLs
+        # Relative: /tts_output/filename.ext
+        # Absolute: http://localhost:5000/tts_output/filename.ext
+        
+        # Extract filename from URL
+        if '/tts_output/' in video_url:
+            # Get the part after '/tts_output/'
+            filename = video_url.split('/tts_output/')[-1]
+            # Remove any query parameters or fragments
+            filename = filename.split('?')[0].split('#')[0]
+            video_path = os.path.join(get_output_dir(), filename)
+        else:
+            return jsonify({"ok": False, "error": "invalid_url_format: URL must contain /tts_output/"}), 400
+        
+        if not os.path.exists(video_path):
+            return jsonify({"ok": False, "error": "video_file_not_found"}), 404
+        
+        # Get original file size for logging
+        original_size = os.path.getsize(video_path)
+        print(f"Original video file size: {original_size} bytes ({original_size/1024/1024:.2f} MB)", file=sys.stderr)
+        
+        # Generate audio filename
+        base_name = os.path.splitext(filename)[0]
+        audio_filename = f"{base_name}-audio.mp3"
+        audio_path = os.path.join(get_output_dir(), audio_filename)
+        
+        # Extract audio using ffmpeg
+        if not shutil.which("ffmpeg"):
+            return jsonify({"ok": False, "error": "ffmpeg_not_available"}), 500
+        
+        try:
+            # Extract audio to MP3 format
+            # -vn: No video
+            # -acodec libmp3lame: Use MP3 codec
+            # -q:a 2: Quality setting (0-9, lower is better, 2 is good quality)
+            # -ar 44100: Sample rate (optional, let ffmpeg decide)
+            # -ac 2: Stereo channels (optional)
+            cmd = [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vn",  # No video stream
+                "-acodec", "libmp3lame",
+                "-q:a", "2",  # Good quality (0-9, lower is better)
+                audio_path
+            ]
+            print(f"Running ffmpeg command: {' '.join(cmd)}", file=sys.stderr)
+            result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            
+            # Check if audio file was created and has reasonable size
+            if not os.path.exists(audio_path):
+                error_msg = f"Audio extraction failed: output file not created"
+                print(error_msg, file=sys.stderr)
+                return jsonify({"ok": False, "error": error_msg}), 500
+            
+            # Get extracted audio file size
+            audio_size = os.path.getsize(audio_path)
+            print(f"Extracted audio file size: {audio_size} bytes ({audio_size/1024/1024:.2f} MB)", file=sys.stderr)
+            print(f"Size reduction: {(1 - audio_size/original_size)*100:.1f}%", file=sys.stderr)
+            
+            # Validate audio size is reasonable (should be much smaller than video)
+            if audio_size >= original_size:
+                warning_msg = f"Warning: Audio file size ({audio_size} bytes) is not significantly smaller than video ({original_size} bytes)"
+                print(warning_msg, file=sys.stderr)
+            
+            print(f"Audio extracted successfully: {audio_path}", file=sys.stderr)
+            
+            return jsonify({
+                "ok": True,
+                "audio_url": f"/tts_output/{audio_filename}",
+                "audio_size": audio_size,
+                "video_size": original_size
+            })
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = f"ffmpeg extraction failed: {str(e)}"
+            print(error_msg, file=sys.stderr)
+            return jsonify({"ok": False, "error": error_msg}), 500
+            
+    except Exception as e:
+        error_msg = f"Audio extraction error: {str(e)}"
+        print(error_msg, file=sys.stderr)
+        return jsonify({"ok": False, "error": error_msg}), 500
+
 @app.route('/api/history/<record_id>', methods=['GET'])
 def api_get_history_record(record_id):
     """Get a specific history record by ID"""
@@ -1466,10 +2050,95 @@ def api_get_history_record(record_id):
     else:
         return jsonify({"ok": False, "error": "not_found"}), 404
 
+@app.route('/api/logs', methods=['GET'])
+def api_get_logs():
+    """
+    Get recent server logs for progress tracking
+    Query parameters:
+    - lines: number of recent log lines to return (default: 50, max: 200)
+    - filter: optional filter pattern (regex) to match specific log lines
+    - seconds: only return logs from last N seconds (default: 120, max: 600)
+    """
+    try:
+        # Get query parameters
+        lines = min(int(request.args.get('lines', 50)), 200)  # Limit to max 200 lines
+        filter_pattern = request.args.get('filter', None)
+        seconds = min(int(request.args.get('seconds', 120)), 600)  # Limit to max 10 minutes
+        
+        # Calculate cutoff time
+        from datetime import datetime, timedelta
+        cutoff_time = datetime.now() - timedelta(seconds=seconds)
+        
+        # Determine log file path
+        log_file = os.path.join(root_dir, 'logs', 'server.log')
+        if not os.path.exists(log_file):
+            # Fallback to root directory
+            log_file = os.path.join(root_dir, 'server.log')
+        
+        if not os.path.exists(log_file):
+            return jsonify({"ok": True, "logs": []})
+        
+        # Read recent log lines
+        recent_logs = []
+        try:
+            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                all_lines = f.readlines()
+                
+            # Get last N lines
+            recent_lines = all_lines[-lines:]
+            
+            # Filter by timestamp (only logs from last N seconds)
+            time_filtered_lines = []
+            for line in recent_lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Parse timestamp from log line (format: "2026-01-18 08:30:18 - INFO - message")
+                try:
+                    # Extract timestamp part (first 19 characters: "2026-01-18 08:30:18")
+                    timestamp_str = line[:19]
+                    log_time = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                    
+                    # Check if log is within time window
+                    if log_time >= cutoff_time:
+                        time_filtered_lines.append(line)
+                except (ValueError, IndexError):
+                    # If timestamp parsing fails, include the line anyway
+                    # (recent lines are likely recent)
+                    time_filtered_lines.append(line)
+            
+            # Apply regex filter if provided
+            if filter_pattern:
+                try:
+                    import re
+                    regex = re.compile(filter_pattern, re.IGNORECASE)
+                    time_filtered_lines = [line for line in time_filtered_lines if regex.search(line)]
+                except re.error:
+                    pass  # Invalid regex, return all lines
+            
+            recent_logs = time_filtered_lines
+            
+        except Exception as e:
+            print(f"Error reading log file: {e}", file=sys.stderr)
+            return jsonify({"ok": True, "logs": []})
+        
+        return jsonify({
+            "ok": True,
+            "logs": recent_logs,
+            "count": len(recent_logs),
+            "time_window": f"last {seconds} seconds"
+        })
+        
+    except Exception as e:
+        print(f"Error in /api/logs: {e}", file=sys.stderr)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5173))
+    port = int(os.environ.get("PORT",5173))
     # Ensure DashScope Key is present
     if not os.environ.get("DASHSCOPE_API_KEY"):
-        print("WARNING: DASHSCOPE_API_KEY not found in environment.", file=sys.stderr)
+        logging.warning("DASHSCOPE_API_KEY not found in environment.")
     
+    logging.info(f"Starting server on port {port}")
     app.run(host='0.0.0.0', port=port)

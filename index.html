@@ -149,8 +149,9 @@
       <!-- ASR SECTION -->
       <div id="asr-section" class="tab-content hidden">
       <section class="card" style="margin-top: 0; border-top: none;">
-        <p class="subtitle">上传音视频文件，自动切换 Qwen3-Omni-Flash 系列模型进行高精度转写。</p>
+        <p class="subtitle">上传音视频文件或输入视频网址（支持B站、YouTube等），自动切换 Qwen3-Omni-Flash 系列模型进行高精度转写。</p>
         
+        <!-- File Upload -->
         <div class="row">
           <div class="field">
             <label class="label" for="asrFile">选择文件</label>
@@ -159,6 +160,18 @@
           <div class="field">
              <label class="label">&nbsp;</label>
              <button id="startAsr" class="btn primary">开始转写</button>
+          </div>
+        </div>
+        
+        <!-- URL Input -->
+        <div class="row" style="margin-top: 12px;">
+          <div class="field" style="flex: 2;">
+            <label class="label" for="asrUrl">或输入视频网址</label>
+            <div style="display: flex; gap: 8px;">
+                <input id="asrUrl" class="input" type="url" placeholder="https://www.bilibili.com/video/..." />
+                <button id="startAsrUrl" class="btn primary">从URL转写</button>
+            </div>
+            <div class="hint" style="margin-top: 4px;">支持直接下载音视频文件链接，以及B站、YouTube等视频网站</div>
           </div>
         </div>
 
@@ -331,7 +344,10 @@
         </div>
     </div>
 
-    <script src="./app.js" defer></script>
-    <script src="./js/history-manager.js" defer></script>
+    <script src="./js/log-parser.js?v=20250118" defer></script>
+    <script src="./js/progress-tracker.js?v=20250118" defer></script>
+    <script src="./app.js?v=20250118" defer></script>
+    <script src="./js/history-manager.js?v=20250118" defer></script>
+    <script src="./js/offline-exporter.js?v=20250118" defer></script>
   </body>
 </html>

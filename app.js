@@ -40,6 +40,8 @@ const ui = {
   ocrStatus: document.getElementById("ocrStatus"),
   asrFile: document.getElementById("asrFile"),
   startAsr: document.getElementById("startAsr"),
+  asrUrl: document.getElementById("asrUrl"),
+  startAsrUrl: document.getElementById("startAsrUrl"),
   asrResultSection: document.getElementById("asrResultSection"),
   asrAudioPlayer: document.getElementById("asrAudioPlayer"),
   asrVideoPlayer: document.getElementById("asrVideoPlayer"),
@@ -212,12 +214,25 @@ async function generateAudio() {
   setStatus("正在生成语音 (Qwen-TTS)...");
   
   // Show progress bar
-  updateProgress('tts', 10, "正在准备生成...");
+  updateProgress('tts', 5, "正在准备生成...");
+  
+  // 创建TTS进度追踪器
+  const ttsTracker = window.ProgressTracker.createTTSTracker({
+    estimatedDuration: Math.max(30000, text.length * 50), // 基于文本长度估算
+    onProgress: (progress, status) => {
+      updateProgress('tts', progress, status);
+    },
+    onComplete: (success, result) => {
+      console.log('TTS tracking completed:', result);
+      if (result.usingFallback) {
+        console.log('TTS used fallback estimation mode');
+      }
+    }
+  });
+  
+  ttsTracker.start();
   
   try {
-    // Update progress during processing
-    setTimeout(() => updateProgress('tts', 30, "正在发送请求..."), 300);
-    
     const res = await fetch("/api/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -235,7 +250,13 @@ async function generateAudio() {
     }
 
     const data = await res.json();
-    if (!data.ok) throw new Error(data.error);
+    if (!data.ok) {
+      ttsTracker.stop();
+      throw new Error(data.error);
+    }
+    
+    // 停止进度追踪
+    ttsTracker.stop();
     
     // Update progress to show completion
     updateProgress('tts', 100, "生成完成！");
@@ -279,6 +300,8 @@ async function generateAudio() {
     
   } catch (e) {
     setStatus("生成失败: " + e.message);
+    ttsTracker.stop();
+    hideProgress('tts');
   } finally {
     ui.generateAudio.disabled = false;
   }
@@ -536,22 +559,49 @@ async function startAsr() {
   ui.asrResultSection.classList.add("hidden");
 
   // Show progress bar
-  updateProgress('asr', 10, "正在准备上传...");
+  updateProgress('asr', 5, "正在准备上传...");
+  
+  // 创建ASR进度追踪器（不带taskId，因为服务器返回后才知）
+  const asrTracker = window.ProgressTracker.createASRTracker({
+    estimatedDuration: Math.max(60000, file.size / 100000 * 60), // 基于文件大小估算(1MB约60秒)
+    onProgress: (progress, status) => {
+      updateProgress('asr', progress, status);
+    },
+    onComplete: (success, result) => {
+      console.log('ASR tracking completed:', result);
+      if (result.usingFallback) {
+        console.log('ASR used fallback estimation mode');
+      }
+    }
+  });
+  
+  asrTracker.start();
   
   const form = new FormData();
   form.append("file", file);
   form.append("dashscopeKey", dashscopeKey);
 
   try {
-    // Update progress during upload
-    setTimeout(() => updateProgress('asr', 30, "正在上传文件..."), 300);
-    
     const res = await fetch("/api/asr", { method: "POST", body: form });
     
-    // Update progress during processing
-    updateProgress('asr', 60, "正在转写音频...");
-    
     const data = await res.json();
+    
+    if (!data.ok) {
+      asrTracker.stop();
+      throw new Error(data.error || "转写失败");
+    }
+    
+    // 获取服务器返回的task_id
+    const taskId = data.task_id;
+    console.log('ASR Task ID:', taskId);
+    
+    // 更新tracker的taskId以过滤日志
+    if (taskId && asrTracker.setTaskId) {
+      asrTracker.setTaskId(taskId);
+    }
+    
+    // 停止进度追踪
+    asrTracker.stop();
     
     // Update progress to show completion
     updateProgress('asr', 100, "转写完成！");
@@ -689,24 +739,26 @@ async function startAsr() {
             ui.asrTopics.appendChild(li);
         });
         
-        const blobUrl = URL.createObjectURL(file);
+        // Use persistent audio URL from server for current session
         if (file.type.startsWith("video") || file.name.endsWith(".mkv")) {
-            ui.asrVideoPlayer.src = blobUrl;
+            ui.asrVideoPlayer.src = data.audio_url;
             ui.asrVideoPlayer.style.display = "block";
             ui.asrAudioPlayer.style.display = "none";
         } else {
-            ui.asrAudioPlayer.src = blobUrl;
+            ui.asrAudioPlayer.src = data.audio_url;
             ui.asrAudioPlayer.style.display = "block";
             ui.asrVideoPlayer.style.display = "none";
         }
         
         ui.asrStatus.textContent = "转写完成！";
         
-        // Save to history
+        // Save to history - use server's persistent audio URL
+        const fileType = data.file_type || 'audio'; // Get file type from server response
         const historyRecord = {
             type: 'asr',
             filename: file.name,
-            audioUrl: blobUrl,
+            audioUrl: data.audio_url,  // Use persistent URL from server
+            fileType: fileType,  // Save file type (video or audio)
             transcript: data.transcript,
             subtitles: data.subtitles || [],
             keywords: data.keywords || [],
@@ -718,6 +770,8 @@ async function startAsr() {
         
     } catch (e) {
         ui.asrStatus.textContent = "错误: " + e.message;
+        asrTracker.stop();
+        hideProgress('asr');
     } finally {
         ui.startAsr.disabled = false;
         ui.startAsr.textContent = "开始转写";
@@ -725,6 +779,227 @@ async function startAsr() {
 }
 
 ui.startAsr.addEventListener("click", startAsr);
+
+// --- ASR from URL ---
+async function startAsrUrl() {
+    const url = (ui.asrUrl.value ?? "").trim();
+    const dashscopeKey = ui.dashscopeKey.value.trim();
+    
+    if (!url) {
+        alert("请输入视频网址");
+        return;
+    }
+    if (!dashscopeKey) {
+        alert("请先配置 API Key。");
+        return;
+    }
+
+    ui.startAsrUrl.disabled = true;
+    ui.startAsr.textContent = "转写中...";
+    ui.startAsrUrl.textContent = "正在下载并转写...";
+    ui.asrStatus.textContent = "正在从URL下载音视频并进行转写 (Qwen3-Omni-Flash)...";
+    ui.asrResultSection.classList.add("hidden");
+
+    // Show progress bar
+    updateProgress('asr', 5, "正在下载文件...");
+    
+    // 创建ASR进度追踪器
+    const asrTracker = window.ProgressTracker.createASRTracker({
+    estimatedDuration: 120000, // URL转写预估2分钟
+    onProgress: (progress, status) => {
+      updateProgress('asr', progress, status);
+    },
+    onComplete: (success, result) => {
+      console.log('ASR URL tracking completed:', result);
+      if (result.usingFallback) {
+        console.log('ASR URL used fallback estimation mode');
+      }
+    }
+  });
+  
+  asrTracker.start();
+
+    try {
+        const res = await fetch("/api/asr-url", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url, dashscopeKey })
+        });
+
+        const data = await res.json();
+
+        if (!data.ok) {
+          asrTracker.stop();
+          throw new Error(data.error || "转写失败");
+        }
+        
+        // 停止进度追踪
+        asrTracker.stop();
+        
+        // Update progress to show completion
+        updateProgress('asr', 100, "转写完成！");
+
+        // Hide progress bar after a short delay
+        setTimeout(() => hideProgress('asr'), 1500);
+
+        if (!data.ok) {
+            throw new Error(data.error || "转写失败");
+        }
+
+        ui.asrResultSection.classList.remove("hidden");
+        ui.asrText.value = data.transcript;
+
+        state.asrSubtitles = data.subtitles || [];
+        renderAsrInteractive();
+        ui.showAsrInteractive.click();
+
+        ui.asrKeywords.innerHTML = "";
+        (data.keywords || []).forEach(kw => {
+            const tag = document.createElement("span");
+            tag.className = "keyword-tag";
+            tag.textContent = kw;
+            tag.style.marginRight = "8px";
+            ui.asrKeywords.appendChild(tag);
+        });
+
+        ui.asrSummary.textContent = data.summary || "（无摘要）";
+
+        // Topics
+        ui.asrTopics.innerHTML = "";
+
+        const formatTime = (seconds) => {
+            const m = Math.floor(seconds / 60);
+            const s = Math.floor(seconds % 60);
+            return `${m}分${s}秒`;
+        };
+
+        (data.topics || []).forEach(topic => {
+            const li = document.createElement("li");
+            li.className = "topic-item";
+
+            let startT = 0, endT = 0;
+            let found = false;
+
+            if (topic.start_snippet && state.asrSubtitles.length > 0) {
+                const cleanSnippet = topic.start_snippet.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "");
+                const snippetLen = Math.min(cleanSnippet.length, 15);
+                const searchStr = cleanSnippet.substring(0, snippetLen);
+
+                let matchIdx = -1;
+
+                matchIdx = state.asrSubtitles.findIndex(s => {
+                    const cleanSub = s.text.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "");
+                    return cleanSub.includes(searchStr);
+                });
+
+                if (matchIdx === -1) {
+                    for (let i = 0; i < state.asrSubtitles.length; i++) {
+                        let combined = state.asrSubtitles[i].text;
+                        if (i + 1 < state.asrSubtitles.length) combined += state.asrSubtitles[i + 1].text;
+                        if (i + 2 < state.asrSubtitles.length) combined += state.asrSubtitles[i + 2].text;
+
+                        const cleanCombined = combined.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "");
+
+                        if (cleanCombined.includes(searchStr)) {
+                            matchIdx = i;
+                            break;
+                        }
+                    }
+                }
+
+                if (matchIdx !== -1) {
+                    startT = state.asrSubtitles[matchIdx].start;
+                    found = true;
+
+                    if (topic.end_snippet) {
+                        const cleanEnd = topic.end_snippet.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "").substring(0, 10);
+                        let endMatchIdx = -1;
+
+                        endMatchIdx = state.asrSubtitles.findIndex((s, idx) => idx > matchIdx && s.text.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "").includes(cleanEnd));
+
+                        if (endMatchIdx === -1) {
+                            for (let i = matchIdx + 1; i < state.asrSubtitles.length; i++) {
+                                let combined = state.asrSubtitles[i].text;
+                                if (i + 1 < state.asrSubtitles.length) combined += state.asrSubtitles[i + 1].text;
+                                if (i + 2 < state.asrSubtitles.length) combined += state.asrSubtitles[i + 2].text;
+
+                                const cleanCombined = combined.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, "");
+                                if (cleanCombined.includes(cleanEnd)) {
+                                    endMatchIdx = i;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (endMatchIdx !== -1) {
+                            endT = state.asrSubtitles[endMatchIdx].end;
+                        }
+                    }
+                }
+            }
+
+            let timeInfo = "";
+            if (found) {
+                const timeStr = endT > startT ? `${formatTime(startT)}~${formatTime(endT)}` : `${formatTime(startT)}`;
+                timeInfo = `<span style="color:var(--primary); font-size:0.85em; margin-left:8px;">[${timeStr}]</span>`;
+
+                li.style.cursor = "pointer";
+                li.title = `点击跳转到 ${formatTime(startT)}`;
+                li.addEventListener("click", () => {
+                    const player = ui.asrVideoPlayer.style.display !== "none" ? ui.asrVideoPlayer : ui.asrAudioPlayer;
+                    player.currentTime = startT;
+                    player.play();
+                });
+            } else {
+                timeInfo = `<span style="color:var(--muted); font-size:0.85em; margin-left:8px;">[未匹配]</span>`;
+            }
+
+            li.innerHTML = `<span>${topic.title}</span>${timeInfo}`;
+            ui.asrTopics.appendChild(li);
+        });
+
+        // Use appropriate player based on file type
+        const fileType = data.file_type || 'audio';
+        if (fileType === 'video') {
+            ui.asrVideoPlayer.src = data.audio_url;
+            ui.asrVideoPlayer.style.display = "block";
+            ui.asrAudioPlayer.style.display = "none";
+        } else {
+            ui.asrAudioPlayer.src = data.audio_url;
+            ui.asrAudioPlayer.style.display = "block";
+            ui.asrVideoPlayer.style.display = "none";
+        }
+
+        ui.asrStatus.textContent = "转写完成！";
+
+        // Save to history
+        const historyRecord = {
+            type: 'asr',
+            filename: data.source_url || url, // Use original URL as filename
+            audioUrl: data.audio_url,
+            fileType: fileType,
+            transcript: data.transcript,
+            subtitles: data.subtitles || [],
+            keywords: data.keywords || [],
+            summary: data.summary || "",
+            topics: data.topics || [],
+            analysis: data.analysis || null,
+            source_url: data.source_url // Track the original URL
+        };
+        HistoryManager.saveHistory(historyRecord);
+
+    } catch (e) {
+        ui.asrStatus.textContent = "错误: " + e.message;
+        asrTracker.stop();
+        hideProgress('asr');
+    } finally {
+        ui.startAsrUrl.disabled = false;
+        ui.startAsr.textContent = "开始转写";
+        ui.startAsrUrl.textContent = "从URL转写";
+    }
+}
+
+ui.startAsrUrl.addEventListener("click", startAsrUrl);
 
 function renderAsrInteractive() {
     ui.asrInteractive.innerHTML = "";
@@ -1745,10 +2020,45 @@ function openHistoryDetail(record) {
   
   historyUi.detailContent.innerHTML = content;
   
-  // Initialize player and subtitles for history detail
-  if (record.type === 'tts' || record.type === 'asr') {
-    initHistoryPlayer(record);
-  }
+  // Export options are already shown/hidden in renderASRHistoryDetail
+  // No need to manipulate here
+  
+  // Wait for DOM to update before binding events
+  requestAnimationFrame(() => {
+    // Remove old event listeners from export button
+    const exportBtn = document.getElementById("exportOfflineBtn");
+    if (exportBtn) {
+      // Clone button to remove all event listeners
+      const newBtn = exportBtn.cloneNode(true);
+      exportBtn.parentNode.replaceChild(newBtn, exportBtn);
+      
+      // Add new event listener with the current record
+      newBtn.addEventListener("click", () => {
+        // Get selected export mode - IMPORTANT: re-query DOM to get current selection
+        let exportMode = 'audio';
+        if (record.type === 'asr' && record.fileType === 'video') {
+          const selectedMode = document.querySelector('input[name="exportMode"]:checked');
+          if (selectedMode) {
+            exportMode = selectedMode.value;
+            console.log('Export mode selected:', exportMode); // Debug log
+          }
+        }
+        
+        console.log('Exporting with mode:', exportMode, 'for record:', record.filename); // Debug log
+        
+        if (record.type === 'tts') {
+          OfflineExporter.exportTTSHistory(record);
+        } else if (record.type === 'asr') {
+          OfflineExporter.exportASRHistory(record, exportMode);
+        }
+      });
+    }
+    
+    // Initialize player and subtitles for history detail
+    if (record.type === 'tts' || record.type === 'asr') {
+      initHistoryPlayer(record);
+    }
+  });
 }
 
 // Helper function to format time
@@ -1761,6 +2071,11 @@ function formatTime(seconds) {
 // Render TTS history detail
 function renderTTSHistoryDetail(record) {
   return `
+    <div style="margin-bottom: 16px; text-align: right;">
+      <button id="exportOfflineBtn" class="btn primary" style="padding: 8px 16px; font-size: 14px;">
+        📥 导出离线HTML文件
+      </button>
+    </div>
     <div class="history-detail-player">
       <audio id="historyAudio" controls src="${record.audioUrl}"></audio>
     </div>
@@ -1823,9 +2138,34 @@ function renderTTSHistoryDetail(record) {
 
 // Render ASR history detail
 function renderASRHistoryDetail(record) {
+  const fileType = record.fileType || 'audio';
+  const playerHtml = record.audioUrl 
+    ? (fileType === 'video' 
+        ? `<video id="historyAudio" controls src="${record.audioUrl}" style="max-height: 400px;"></video>`
+        : `<audio id="historyAudio" controls src="${record.audioUrl}"></audio>`)
+    : "";
+  
   return `
     <div class="history-detail-player">
-      ${record.audioUrl ? `<audio id="historyAudio" controls src="${record.audioUrl}"></audio>` : ""}
+      ${playerHtml}
+    </div>
+    
+    <div style="margin-bottom: 16px; display: flex; align-items: center; gap: 16px;">
+      <button id="exportOfflineBtn" class="btn primary" style="padding: 8px 16px; font-size: 14px;">
+        📥 导出离线HTML文件
+      </button>
+      
+      <!-- Export Options (shown next to button for video files) -->
+      <div id="exportOptions" style="${fileType === 'video' ? 'display: flex;' : 'display: none;'} gap: 16px; align-items: center;">
+        <label id="videoIncludedOption" style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+          <input type="radio" name="exportMode" value="video">
+          <span>包含视频</span>
+        </label>
+        <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+          <input type="radio" name="exportMode" value="audio" checked>
+          <span>仅音频</span>
+        </label>
+      </div>
     </div>
     
     <div class="history-detail-info">
