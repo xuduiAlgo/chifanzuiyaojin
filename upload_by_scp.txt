@@ -1,0 +1,2 @@
+scp /Users/xuwenming/Downloads/Guijiang_Value_investment_01.html root@47.118.17.41:/opt/offline-html/html/ 
+Guijiang_Value_investment_01.html 
